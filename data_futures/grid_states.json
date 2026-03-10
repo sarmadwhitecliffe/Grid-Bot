@@ -261,7 +261,7 @@
     "total_fees": "0.00000000",
     "grid_fills": 0,
     "counter_fills": 0,
-    "last_tick_time": "2026-03-10T06:15:41.022269+00:00"
+    "last_tick_time": "2026-03-10T06:16:22.447043+00:00"
   },
   "ETH/USDT": {
     "symbol_id": "ETH/USDT",
@@ -625,7 +625,7 @@
     "total_fees": "0.00000000",
     "grid_fills": 0,
     "counter_fills": 0,
-    "last_tick_time": "2026-03-10T06:15:41.022282+00:00"
+    "last_tick_time": "2026-03-10T06:16:22.447055+00:00"
   },
   "LINK/USDT": {
     "symbol_id": "LINK/USDT",
@@ -989,7 +989,7 @@
     "total_fees": "0.00000000",
     "grid_fills": 0,
     "counter_fills": 0,
-    "last_tick_time": "2026-03-10T06:15:41.022291+00:00"
+    "last_tick_time": "2026-03-10T06:16:22.447063+00:00"
   },
   "BCH/USDT": {
     "symbol_id": "BCH/USDT",
@@ -1353,7 +1353,7 @@
     "total_fees": "0.00000000",
     "grid_fills": 0,
     "counter_fills": 0,
-    "last_tick_time": "2026-03-10T06:15:41.022299+00:00"
+    "last_tick_time": "2026-03-10T06:16:22.447072+00:00"
   },
   "SOL/USDT": {
     "symbol_id": "SOL/USDT",
@@ -1537,7 +1537,7 @@
     "total_fees": "0.00000000",
     "grid_fills": 0,
     "counter_fills": 0,
-    "last_tick_time": "2026-03-10T06:15:41.022304+00:00"
+    "last_tick_time": "2026-03-10T06:16:22.447077+00:00"
   },
   "ADA/USDT": {
     "symbol_id": "ADA/USDT",
@@ -1721,6 +1721,6 @@
     "total_fees": "0.00000000",
     "grid_fills": 0,
     "counter_fills": 0,
-    "last_tick_time": "2026-03-10T06:15:41.022309+00:00"
+    "last_tick_time": "2026-03-10T06:16:22.447081+00:00"
   }
 }
