@@ -1,0 +1,267 @@
+"""
+State Manager - Persistent Storage for Bot State
+
+Manages loading and saving of trading bot state to JSON files:
+- Active positions
+- Symbol capitals (allocated funds per symbol)
+- Trade history
+- Strategy configurations
+
+Provides atomic writes, error handling, and data validation.
+"""
+
+import json
+import logging
+from pathlib import Path
+from decimal import Decimal
+from typing import Dict, List, Any, Tuple, Optional, Callable
+
+from bot_v2.models.position import Position
+from bot_v2.models.strategy_config import StrategyConfig
+from bot_v2.utils.decimal_utils import DecimalEncoder
+
+logger = logging.getLogger(__name__)
+
+
+class StateManager:
+    """
+    Manages persistence of trading bot state to JSON files.
+    
+    Provides:
+    - Load/save active positions
+    - Load/save symbol capitals
+    - Load/save trade history
+    - Load strategy configurations
+    - Atomic writes with error handling
+    """
+    
+    def __init__(self, data_dir: Path = Path("data_futures")) -> None:
+        """
+        Initialize state manager.
+        
+        Args:
+            data_dir: Directory for data files (default: data_futures/)
+        """
+        self.data_dir = data_dir
+        self.data_dir.mkdir(exist_ok=True)
+        
+        self.positions_file = self.data_dir / 'active_positions.json'
+        self.capitals_file = self.data_dir / 'symbol_capitals.json'
+        self.history_file = self.data_dir / 'trade_history.json'
+        self.strategy_configs_file = Path("config") / "strategy_configs.json"
+        
+        logger.info(f"StateManager initialized with data_dir: {self.data_dir}")
+    
+    def _load_json(
+        self,
+        file_path: Path,
+        default_factory: Callable[[], Any]
+    ) -> Any:
+        """
+        Safely load JSON from file with fallback to default factory.
+        
+        Args:
+            file_path: Path to the JSON file
+            default_factory: Function that returns default value if file doesn't exist
+            
+        Returns:
+            Parsed JSON data or default value
+        """
+        if not file_path.exists():
+            logger.debug(f"File {file_path} does not exist, using default")
+            return default_factory()
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            if not content.strip():
+                logger.warning(f"File {file_path} is empty, using default")
+                return default_factory()
+            
+            return json.loads(content, parse_float=Decimal)
+            
+        except (IOError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to load or parse {file_path}: {e}")
+            return default_factory()
+    
+    def _save_json(self, data: Any, file_path: Path) -> None:
+        """
+        Safely save data to JSON file with error handling.
+        
+        Args:
+            data: Data to serialize to JSON
+            file_path: Target file path
+        """
+        try:
+            # Ensure parent directory exists
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Write to file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, cls=DecimalEncoder)
+            
+            logger.debug(f"Saved state to {file_path}")
+            
+        except (IOError, TypeError) as e:
+            logger.error(f"Error saving state to {file_path}: {e}", exc_info=True)
+    
+    def load_positions(self) -> Dict[str, Position]:
+        """
+        Load active positions from persistent storage.
+        
+        Returns:
+            Dictionary mapping symbol to Position objects
+        """
+        positions_raw = self._load_json(self.positions_file, dict)
+        
+        positions = {}
+        for symbol, pos_dict in positions_raw.items():
+            try:
+                positions[symbol] = Position.from_dict(pos_dict)
+            except Exception as e:
+                logger.error(f"Failed to load position for {symbol}: {e}")
+                continue
+        
+        logger.info(f"Loaded {len(positions)} active positions")
+        return positions
+    
+    def load_capitals(self) -> Dict[str, Decimal]:
+        """
+        Load symbol capitals from persistent storage.
+        
+        Returns:
+            Dictionary mapping symbol to allocated capital (Decimal)
+        """
+        capitals_raw = self._load_json(self.capitals_file, dict)
+        
+        capitals = {}
+        for symbol, cap_str in capitals_raw.items():
+            try:
+                capitals[symbol] = Decimal(str(cap_str))
+            except Exception as e:
+                logger.error(f"Failed to load capital for {symbol}: {e}")
+                continue
+        
+        logger.info(f"Loaded capitals for {len(capitals)} symbols")
+        return capitals
+    
+    def load_trade_history(self) -> List[Dict[str, Any]]:
+        """
+        Load trade history from persistent storage.
+        
+        Returns:
+            List of trade history entries (dicts)
+        """
+        history = self._load_json(self.history_file, list)
+        logger.info(f"Loaded {len(history)} trade history entries")
+        return history
+    
+    def load_states(self) -> Tuple[Dict[str, Position], Dict[str, Decimal], List[Dict[str, Any]]]:
+        """
+        Load all bot state from persistent storage.
+        
+        Returns:
+            Tuple of (active_positions, symbol_capitals, trade_history)
+        """
+        positions = self.load_positions()
+        capitals = self.load_capitals()
+        history = self.load_trade_history()
+        
+        logger.info(
+            f"Loaded all states: {len(positions)} positions, "
+            f"{len(capitals)} capitals, {len(history)} history entries"
+        )
+        
+        return positions, capitals, history
+    
+    def load_strategy_configs(self) -> Dict[str, StrategyConfig]:
+        """
+        Load strategy configurations from config file.
+        
+        Returns:
+            Dictionary mapping symbol to StrategyConfig objects
+        """
+        main_configs_raw = self._load_json(self.strategy_configs_file, dict)
+        
+        if not main_configs_raw:
+            logger.critical(
+                f"Primary config file '{self.strategy_configs_file}' "
+                f"empty or invalid."
+            )
+            return {}
+        
+        final_configs = {}
+        for symbol, base_params in main_configs_raw.items():
+            # Skip disabled strategies
+            if not base_params.get('enabled', False):
+                logger.debug(f"Skipping disabled strategy: {symbol}")
+                continue
+            
+            final_params = base_params.copy()
+            clean_symbol = symbol.upper().replace('/', '')
+            
+            # Special handling for 30m timeframe volatility lookback
+            timeframe = final_params.get('timeframe')
+            if timeframe == '30m':
+                final_params['volatility_filter_lookback'] = 30
+            
+            try:
+                final_configs[clean_symbol] = StrategyConfig(clean_symbol, final_params)
+            except Exception as e:
+                logger.error(f"Failed to load config for {symbol}: {e}")
+                continue
+        
+        logger.info(f"Loaded {len(final_configs)} strategy configurations")
+        return final_configs
+    
+    def save_positions(self, positions: Dict[str, Position]) -> None:
+        """
+        Save active positions to persistent storage.
+        
+        Args:
+            positions: Dictionary mapping symbol to Position objects
+        """
+        serialized = {symbol: pos.to_dict() for symbol, pos in positions.items()}
+        self._save_json(serialized, self.positions_file)
+        logger.info(f"Saved {len(positions)} active positions")
+    
+    def save_capitals(self, capitals: Dict[str, Decimal]) -> None:
+        """
+        Save symbol capitals to persistent storage.
+        
+        Args:
+            capitals: Dictionary mapping symbol to capital (Decimal)
+        """
+        serialized = {symbol: str(cap) for symbol, cap in capitals.items()}
+        self._save_json(serialized, self.capitals_file)
+        logger.info(f"Saved capitals for {len(capitals)} symbols")
+    
+    def save_history(self, history: List[Dict[str, Any]]) -> None:
+        """
+        Save trade history to persistent storage.
+        
+        Args:
+            history: List of trade history entries (dicts)
+        """
+        self._save_json(history, self.history_file)
+        logger.info(f"Saved {len(history)} trade history entries")
+    
+    def save_all_states(
+        self,
+        positions: Dict[str, Position],
+        capitals: Dict[str, Decimal],
+        history: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Save all bot state to persistent storage.
+        
+        Args:
+            positions: Active positions
+            capitals: Symbol capitals
+            history: Trade history
+        """
+        self.save_positions(positions)
+        self.save_capitals(capitals)
+        self.save_history(history)
+        logger.info("Saved all bot states")

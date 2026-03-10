@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # Grid Trading Bot
+  grid-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: grid-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+    networks:
+      - grid-bot-network
+    depends_on:
+      - redis
+      - mongodb
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis - For caching and rate limiting
+  redis:
+    image: redis:7-alpine
+    container_name: grid-bot-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - grid-bot-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MongoDB - For historical data and trade logs
+  mongodb:
+    image: mongo:7
+    container_name: gri    container_name: gri    contaito    contaports:
+      - "27017:27017"
+    envir    envir     MONGO_INI    envir SERNAME    envir    envir     MOTDB_    envir    envir     MONGwo    envir    envir     MONBA    envir  
+          s:
+      - mongo-d      - mongo-d      - ng      - mongo-d    igdb
+                              -ne     
+    heal    heal    heal    he"CM    heal   h", "--eval", "db.a    heal    hein    ]
+      i      i      i      i   ut: 10s
+      ret      ret      retna - M      ret    hboard
+  g  g  g  g  g  g  g  g  g  g  g  g  g  gst
+  g  gntainer_name: grid-bot-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environme    environme    eUR    environAS    environme    en GF_INSTALL_PLUGINS=redis-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - grid-bot-network
+    depends_on:
+      - redis
+
+  # Prometheus - Metrics collection
+  prometh  prometh  prometh  prometh  prometh  promecontainer_name: g  prometh  promets
+  prometh  prometh  prometh  prometh  prometh  promecontainer_name: g  
+                      th                      th                      th                      th                      th                      th                      thfig         c/pr                      th                      th            theu                      th             us                      th                      th                      th           ro                      th             ot-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  redis-data:
+idge
+   th                data:
+  prometheus-data:

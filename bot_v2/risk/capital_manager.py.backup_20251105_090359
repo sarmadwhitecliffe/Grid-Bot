@@ -1,0 +1,280 @@
+"""
+Capital Manager - Simple Single Capital Per Symbol
+
+Manages capital allocation per symbol.
+Thread-safe operations for concurrent access.
+
+Design Philosophy:
+- ONE capital value per symbol
+- Mode (sim/live) read from strategy_configs.json (single source of truth)
+- Tier tracking for adaptive risk management
+- Simple, testable, maintainable
+
+Example:
+    >>> manager = CapitalManager(data_dir=Path("data_futures"))
+    >>> manager.get_capital("BTCUSDT")
+    Decimal('1000.00')
+    >>> manager.update_capital("BTCUSDT", Decimal("50.00"))  # +$50 profit
+    >>> manager.get_capital("BTCUSDT")
+    Decimal('1050.00')
+"""
+
+import asyncio
+import json
+import logging
+from decimal import Decimal
+from pathlib import Path
+from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class CapitalManager:
+    """
+    Thread-safe capital management for trading symbols.
+    
+    Storage Format:
+    {
+        "BTCUSDT": {
+            "capital": "1000.00",
+            "tier": "PROBATION",   # From adaptive risk manager
+            "last_notified_tier": "PROBATION"
+        }
+    }
+    
+    Note: Mode (simulation/live) is read from strategy_configs.json,
+    not stored here. Single source of truth.
+    """
+    
+    def __init__(self, data_dir: Path) -> None:
+        """
+        Initialize capital manager.
+        
+        Args:
+            data_dir: Directory for capital persistence file
+        """
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.capitals_file = self.data_dir / "symbol_capitals.json"
+        
+        # Thread safety
+        self._lock = asyncio.Lock()
+        
+        # In-memory state
+        self._capitals: Dict[str, Dict[str, str]] = {}
+        
+        # Load existing capitals
+        self._load()
+    
+    def _load(self) -> None:
+        """Load capitals from disk."""
+        if not self.capitals_file.exists():
+            logger.info("No existing capitals file, starting fresh")
+            return
+        
+        try:
+            with open(self.capitals_file, 'r') as f:
+                data = json.load(f)
+            
+            # Handle legacy format (plain string capital)
+            for symbol, cap_data in data.items():
+                if isinstance(cap_data, (str, int, float)):
+                    # Legacy format: {"BTCUSDT": "1000.00"}
+                    self._capitals[symbol] = {
+                        "capital": str(cap_data),
+                        "tier": "PROBATION",
+                        "last_notified_tier": "PROBATION"
+                    }
+                    logger.info(f"Migrated {symbol} from legacy format")
+                else:
+                    # New format: full dict (remove mode if present)
+                    cleaned = {
+                        "capital": cap_data.get("capital", "1000.00"),
+                        "tier": cap_data.get("tier", "PROBATION"),
+                        "last_notified_tier": cap_data.get("last_notified_tier", "PROBATION")
+                    }
+                    self._capitals[symbol] = cleaned
+            
+            logger.info(f"Loaded capitals for {len(self._capitals)} symbols")
+        
+        except Exception as e:
+            logger.error(f"Error loading capitals: {e}", exc_info=True)
+            self._capitals = {}
+    
+    def _save(self) -> None:
+        """Save capitals to disk."""
+        try:
+            with open(self.capitals_file, 'w') as f:
+                json.dump(self._capitals, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving capitals: {e}", exc_info=True)
+    
+    async def get_capital(self, symbol: str) -> Decimal:
+        """
+        Get current capital for a symbol.
+        
+        Args:
+            symbol: Trading symbol
+        
+        Returns:
+            Current capital (default $1000 for new symbols)
+        """
+        async with self._lock:
+            if symbol not in self._capitals:
+                # Initialize new symbol with default capital (without recursion)
+                self._capitals[symbol] = {
+                    "capital": "1000.00",
+                    "tier": "PROBATION",
+                    "last_notified_tier": "PROBATION"
+                }
+                self._save()
+                logger.info(f"Initialized {symbol} with default capital $1000")
+            
+            return Decimal(self._capitals[symbol]["capital"])
+    
+    async def update_capital(self, symbol: str, pnl: Decimal) -> Decimal:
+        """
+        Update capital after trade close (thread-safe).
+        
+        Args:
+            symbol: Trading symbol
+            pnl: Profit/loss to apply
+        
+        Returns:
+            New capital after update
+        """
+        async with self._lock:
+            # Get or initialize capital (inline to avoid recursion)
+            if symbol not in self._capitals:
+                self._capitals[symbol] = {
+                    "capital": "1000.00",
+                    "tier": "PROBATION",
+                    "last_notified_tier": "PROBATION"
+                }
+                logger.info(f"Initialized {symbol} with default capital $1000")
+            
+            current = Decimal(self._capitals[symbol]["capital"])
+            new_capital = current + pnl
+            
+            # Prevent negative capital
+            if new_capital < Decimal("0"):
+                logger.warning(
+                    f"{symbol} capital would go negative "
+                    f"(${current} + ${pnl}), clamping to $0"
+                )
+                new_capital = Decimal("0")
+            
+            self._capitals[symbol]["capital"] = str(new_capital)
+            self._save()
+            
+            logger.info(
+                f"{symbol} capital: ${current:.2f} → ${new_capital:.2f} "
+                f"(PnL: ${pnl:+.2f})"
+            )
+            
+            return new_capital
+    
+    async def set_capital(self, symbol: str, amount: Decimal) -> None:
+        """
+        Manually set capital (e.g., when resetting for testing).
+        
+        Args:
+            symbol: Trading symbol
+            amount: New capital amount
+        """
+        async with self._lock:
+            if symbol not in self._capitals:
+                self._capitals[symbol] = {
+                    "capital": str(amount),
+                    "tier": "PROBATION",
+                    "last_notified_tier": "PROBATION"
+                }
+            else:
+                old_capital = self._capitals[symbol]["capital"]
+                self._capitals[symbol]["capital"] = str(amount)
+                logger.info(
+                    f"{symbol} capital manually set: ${old_capital} → ${amount}"
+                )
+            
+            self._save()
+    
+    async def get_tier(self, symbol: str) -> str:
+        """Get risk tier for a symbol."""
+        async with self._lock:
+            if symbol not in self._capitals:
+                return "PROBATION"
+            return self._capitals[symbol].get("tier", "PROBATION")
+    
+    async def set_tier(self, symbol: str, tier: str) -> None:
+        """
+        Update risk tier (called by adaptive risk manager).
+        
+        Args:
+            symbol: Trading symbol
+            tier: Risk tier name
+        """
+        async with self._lock:
+            if symbol not in self._capitals:
+                # Initialize without recursion
+                self._capitals[symbol] = {
+                    "capital": "1000.00",
+                    "mode": "simulation",
+                    "tier": tier,
+                    "last_notified_tier": "PROBATION"
+                }
+                logger.info(f"Initialized {symbol} with tier {tier}")
+            else:
+                old_tier = self._capitals[symbol].get("tier", "PROBATION")
+                self._capitals[symbol]["tier"] = tier
+                
+                if old_tier != tier:
+                    logger.info(f"{symbol} tier changed: {old_tier} → {tier}")
+            
+            self._save()
+    
+    async def get_last_notified_tier(self, symbol: str) -> str:
+        """Get last tier that user was notified about."""
+        async with self._lock:
+            if symbol not in self._capitals:
+                return "PROBATION"
+            return self._capitals[symbol].get("last_notified_tier", "PROBATION")
+    
+    async def set_last_notified_tier(self, symbol: str, tier: str) -> None:
+        """Update last notified tier (prevent spam)."""
+        async with self._lock:
+            if symbol not in self._capitals:
+                # Initialize without recursion
+                self._capitals[symbol] = {
+                    "capital": "1000.00",
+                    "mode": "simulation",
+                    "tier": "PROBATION",
+                    "last_notified_tier": tier
+                }
+            else:
+                self._capitals[symbol]["last_notified_tier"] = tier
+            
+            self._save()
+    
+    def get_all_capitals(self) -> Dict[str, Decimal]:
+        """
+        Get all symbol capitals (synchronous, for testing).
+        
+        Returns:
+            Dict of symbol → capital
+        """
+        return {
+            symbol: Decimal(data["capital"])
+            for symbol, data in self._capitals.items()
+        }
+    
+    def get_all_modes(self) -> Dict[str, str]:
+        """
+        Get all symbol modes (synchronous, for testing).
+        
+        Returns:
+            Dict of symbol → mode
+        """
+        return {
+            symbol: data.get("mode", "simulation")
+            for symbol, data in self._capitals.items()
+        }

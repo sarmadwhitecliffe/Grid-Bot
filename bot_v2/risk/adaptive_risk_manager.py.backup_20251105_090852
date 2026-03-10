@@ -1,0 +1,373 @@
+"""Adaptive Risk Management System - 5-tier performance-based position sizing"""
+
+import json
+import logging
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Tuple
+import math
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class RiskTier:
+    name: str
+    min_trades: int
+    max_trades: Optional[int]
+    profit_factor_min: float
+    profit_factor_max: Optional[float]
+    sharpe_ratio_min: float
+    win_rate_min: Optional[float]
+    max_drawdown_max: Optional[float]
+    consecutive_losses_max: Optional[int]
+    capital_allocation: float
+    max_leverage: int
+    max_position_size_usd: Optional[int]
+    description: str
+
+def load_risk_tiers_from_config(config_path: str = "config/adaptive_risk_tiers.json") -> List[RiskTier]:
+    """Load risk tiers from JSON configuration file."""
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        tiers = []
+        for tier_config in config['tiers']:
+            tier = RiskTier(
+                name=tier_config['name'],
+                min_trades=tier_config['min_trades'],
+                max_trades=tier_config.get('max_trades'),
+                profit_factor_min=tier_config['min_profit_factor'],
+                profit_factor_max=tier_config.get('max_profit_factor'),
+                sharpe_ratio_min=tier_config.get('min_sharpe_ratio', -999),
+                win_rate_min=tier_config.get('min_win_rate'),
+                max_drawdown_max=tier_config.get('max_drawdown'),
+                consecutive_losses_max=tier_config.get('max_consecutive_losses'),
+                capital_allocation=tier_config['capital_allocation_pct'] / 100.0,
+                max_leverage=tier_config['max_leverage'],
+                max_position_size_usd=tier_config.get('max_position_size_usd'),
+                description=tier_config['description']
+            )
+            tiers.append(tier)
+        
+        # Sort tiers from highest to lowest quality (for tier matching)
+        tiers_sorted = sorted(tiers, key=lambda t: t.capital_allocation, reverse=True)
+        
+        logger.info(f"Loaded {len(tiers)} risk tiers from {config_path}")
+        for tier in tiers_sorted:
+            logger.info(
+                f"  {tier.name}: {tier.capital_allocation*100:.0f}% capital @ {tier.max_leverage}x leverage "
+                f"({tier.min_trades}+ trades, PF>{tier.profit_factor_min:.1f})"
+            )
+        
+        return tiers_sorted
+        
+    except FileNotFoundError:
+        logger.warning(f"Config file not found: {config_path}, using default tiers")
+        return get_default_tiers()
+    except Exception as e:
+        logger.error(f"Error loading risk tiers from config: {e}, using default tiers")
+        return get_default_tiers()
+
+def get_default_tiers() -> List[RiskTier]:
+    """Get default risk tiers (fallback if config file not available)."""
+    PROBATION = RiskTier("PROBATION", 0, 14, 0.0, None, -999, None, None, None, 0.10, 2, 500, "Learning phase")
+    CONSERVATIVE = RiskTier("CONSERVATIVE", 15, None, 0.8, 1.19, -0.5, 0.35, None, None, 0.20, 3, 1000, "Underperforming")
+    STANDARD = RiskTier("STANDARD", 15, None, 1.2, 1.49, 0.5, 0.40, 0.25, None, 0.40, 5, 3000, "Solid performance")
+    AGGRESSIVE = RiskTier("AGGRESSIVE", 30, None, 1.5, 1.99, 1.0, 0.45, 0.15, 5, 0.60, 7, 5000, "Proven performer")
+    CHAMPION = RiskTier("CHAMPION", 50, None, 2.0, None, 1.5, 0.50, 0.12, 3, 0.80, 8, 10000, "Elite performance")
+    return [CHAMPION, AGGRESSIVE, STANDARD, CONSERVATIVE, PROBATION]
+
+# Load tiers from config file on module import
+ALL_TIERS = load_risk_tiers_from_config()
+
+@dataclass
+class PerformanceMetrics:
+    symbol: str
+    total_trades: int
+    lookback_trades: int
+    profit_factor: float
+    sharpe_ratio: float
+    win_rate: float
+    max_drawdown: float
+    avg_win: float
+    avg_loss: float
+    avg_r_multiple: float
+    expectancy_r: float
+    max_consecutive_losses: int
+    current_consecutive_losses: int
+    std_dev_returns: float
+    current_equity: float
+    peak_equity: float
+    last_calculated: str
+    first_trade_date: Optional[str]
+    current_drawdown_pct: float
+    recovery_factor: float
+    
+    def is_valid_sample(self) -> bool:
+        return self.total_trades >= 15
+
+class PerformanceAnalyzer:
+    @staticmethod
+    def calculate_metrics(symbol: str, trade_history: List[Dict[str, Any]], lookback_trades: int = 30) -> PerformanceMetrics:
+        symbol_trades = [t for t in trade_history if t.get('symbol') == symbol]
+        total_trades = len(symbol_trades)
+        
+        if total_trades == 0:
+            return PerformanceMetrics(symbol, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 1000.0, 1000.0, datetime.now(timezone.utc).isoformat(), None, 0.0, 0.0)
+        
+        recent_trades = symbol_trades[-lookback_trades:] if total_trades > lookback_trades else symbol_trades
+        # Support both 'pnl' and 'pnl_usd' field names
+        wins = [t for t in recent_trades if float(t.get('pnl_usd') or t.get('pnl', 0)) > 0]
+        losses = [t for t in recent_trades if float(t.get('pnl_usd') or t.get('pnl', 0)) < 0]
+        
+        total_wins = len(wins)
+        total_losses = len(losses)
+        win_rate = total_wins / len(recent_trades) if recent_trades else 0.0
+        
+        # Support both 'pnl' and 'pnl_usd' field names
+        gross_profit = sum(float(t.get('pnl_usd') or t.get('pnl', 0)) for t in wins)
+        gross_loss = abs(sum(float(t.get('pnl_usd') or t.get('pnl', 0)) for t in losses))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (10.0 if gross_profit > 0 else 0.0)
+        
+        avg_win = gross_profit / total_wins if total_wins > 0 else 0.0
+        avg_loss = gross_loss / total_losses if total_losses > 0 else 0.0
+        
+        # Support both 'r_multiple' and 'realized_r_multiple' field names
+        r_multiples = [float(t.get('realized_r_multiple') or t.get('r_multiple', 0)) for t in recent_trades]
+        avg_r_multiple = sum(r_multiples) / len(r_multiples) if r_multiples else 0.0
+        expectancy_r = win_rate * avg_win - (1 - win_rate) * avg_loss if recent_trades else 0.0
+        
+        if len(r_multiples) > 1:
+            mean_return = sum(r_multiples) / len(r_multiples)
+            variance = sum((r - mean_return) ** 2 for r in r_multiples) / len(r_multiples)
+            std_dev = math.sqrt(variance) if variance > 0 else 0.0001
+            sharpe_ratio = (mean_return / std_dev) * math.sqrt(252) if std_dev > 0 else 0.0
+            std_dev_returns = std_dev
+        else:
+            sharpe_ratio = 0.0
+            std_dev_returns = 0.0
+        
+        equity = 1000.0
+        peak_equity = equity
+        max_dd = 0.0
+        
+        for trade in symbol_trades:
+            # Support both 'pnl' and 'pnl_usd' field names
+            pnl = float(trade.get('pnl_usd') or trade.get('pnl', 0))
+            equity += pnl
+            if equity > peak_equity:
+                peak_equity = equity
+            dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+            max_dd = max(max_dd, dd)
+        
+        current_equity = equity
+        current_dd_pct = (peak_equity - current_equity) / peak_equity if peak_equity > 0 else 0.0
+        net_profit = current_equity - 1000.0
+        recovery_factor = net_profit / (max_dd * 1000.0) if max_dd > 0 else 0.0
+        
+        max_consec_losses = 0
+        current_consec_losses = 0
+        for trade in reversed(recent_trades):
+            # Support both 'pnl' and 'pnl_usd' field names
+            if float(trade.get('pnl_usd') or trade.get('pnl', 0)) < 0:
+                current_consec_losses += 1
+            else:
+                break
+        
+        consec_count = 0
+        for trade in recent_trades:
+            # Support both 'pnl' and 'pnl_usd' field names
+            if float(trade.get('pnl_usd') or trade.get('pnl', 0)) < 0:
+                consec_count += 1
+                max_consec_losses = max(max_consec_losses, consec_count)
+            else:
+                consec_count = 0
+        
+        # Support both 'timestamp' and 'exit_time' field names
+        first_trade_date = symbol_trades[0].get('timestamp') or symbol_trades[0].get('exit_time') if symbol_trades else None
+        
+        return PerformanceMetrics(symbol, total_trades, len(recent_trades), profit_factor, sharpe_ratio, win_rate, max_dd, avg_win, avg_loss, avg_r_multiple, expectancy_r, max_consec_losses, current_consec_losses, std_dev_returns, current_equity, peak_equity, datetime.now(timezone.utc).isoformat(), first_trade_date, current_dd_pct, recovery_factor)
+
+class RiskTierClassifier:
+    @staticmethod
+    def classify(metrics: PerformanceMetrics) -> RiskTier:
+        # Get PROBATION tier from ALL_TIERS (it's the last one)
+        probation_tier = ALL_TIERS[-1]
+        
+        if metrics.total_trades < 15:
+            return probation_tier
+        for tier in ALL_TIERS:
+            if RiskTierClassifier._meets_criteria(metrics, tier):
+                return tier
+        return probation_tier
+    
+    @staticmethod
+    def _meets_criteria(metrics: PerformanceMetrics, tier: RiskTier) -> bool:
+        if metrics.total_trades < tier.min_trades:
+            return False
+        if tier.max_trades and metrics.total_trades > tier.max_trades:
+            return False
+        if metrics.profit_factor < tier.profit_factor_min:
+            return False
+        if tier.profit_factor_max and metrics.profit_factor > tier.profit_factor_max:
+            return False
+        if metrics.sharpe_ratio < tier.sharpe_ratio_min:
+            return False
+        if tier.win_rate_min and metrics.win_rate < tier.win_rate_min:
+            return False
+        if tier.max_drawdown_max and metrics.max_drawdown > tier.max_drawdown_max:
+            return False
+        if tier.consecutive_losses_max and metrics.max_consecutive_losses > tier.consecutive_losses_max:
+            return False
+        return True
+
+class PositionSizer:
+    @staticmethod
+    def calculate_position_size(capital: float, tier: RiskTier, metrics: PerformanceMetrics, current_price: float, atr: float) -> Dict[str, Any]:
+        base_allocation = capital * tier.capital_allocation
+        dd_multiplier = PositionSizer._calculate_drawdown_multiplier(metrics)
+        adjusted_allocation = base_allocation * dd_multiplier
+        kelly_leverage = PositionSizer._calculate_kelly_leverage(metrics.win_rate, metrics.avg_win, metrics.avg_loss, tier.max_leverage)
+        final_leverage = min(kelly_leverage, tier.max_leverage)
+        notional = adjusted_allocation * final_leverage
+        position_size = notional / current_price if current_price > 0 else 0.0
+        if tier.max_position_size_usd and notional > tier.max_position_size_usd:
+            notional = tier.max_position_size_usd
+            position_size = notional / current_price if current_price > 0 else 0.0
+        return {"allowed": True, "tier": tier.name, "capital_allocation_pct": tier.capital_allocation * 100, "leverage": final_leverage, "notional": notional, "position_size": position_size, "base_allocation": base_allocation, "drawdown_mult": dd_multiplier, "kelly_leverage": kelly_leverage, "reasoning": f"{tier.name} tier: {tier.capital_allocation*100}% capital @ {final_leverage}x leverage"}
+    
+    @staticmethod
+    def _calculate_drawdown_multiplier(metrics: PerformanceMetrics) -> float:
+        dd_pct = metrics.current_drawdown_pct
+        if dd_pct <= 0.05:
+            return 1.0
+        elif dd_pct <= 0.10:
+            return 0.90
+        elif dd_pct <= 0.15:
+            return 0.75
+        elif dd_pct <= 0.20:
+            return 0.50
+        elif dd_pct <= 0.30:
+            return 0.30
+        else:
+            return 0.25
+    
+    @staticmethod
+    def _calculate_kelly_leverage(win_rate: float, avg_win: float, avg_loss: float, max_leverage: int) -> int:
+        if avg_loss == 0 or avg_loss >= 0 or win_rate <= 0:
+            return 2
+        b = abs(avg_win / avg_loss)
+        p = win_rate
+        q = 1 - p
+        kelly_f = (p * b - q) / b
+        safe_kelly = kelly_f * 0.5
+        kelly_leverage = safe_kelly * 10
+        leverage = max(1, min(int(kelly_leverage), max_leverage))
+        return leverage
+
+class PortfolioRiskMonitor:
+    MAX_PORTFOLIO_HEAT = 0.08
+    MAX_CONCURRENT_POSITIONS = 6
+    
+    @staticmethod
+    def check_portfolio_heat(active_positions: List[Dict[str, Any]], proposed_risk: float, total_capital: float) -> Tuple[bool, float, str]:
+        current_risk = sum(float(pos.get('initial_risk_atr', 0)) * float(pos.get('initial_amount', 0)) for pos in active_positions)
+        total_risk = current_risk + proposed_risk
+        if total_capital <= 0:
+            return False, 0.0, "Total capital is zero"
+        heat_ratio = total_risk / total_capital
+        if heat_ratio <= 0.06:
+            return True, 1.0, "Portfolio heat optimal"
+        elif heat_ratio <= PortfolioRiskMonitor.MAX_PORTFOLIO_HEAT:
+            multiplier = 1.0 - ((heat_ratio - 0.06) / 0.02) * 0.5
+            return True, multiplier, f"Portfolio heat elevated: {heat_ratio*100:.1f}%"
+        else:
+            multiplier = max(0.25, 0.08 / heat_ratio)
+            return True, multiplier, f"Portfolio heat high: {heat_ratio*100:.1f}%, reducing position"
+
+class KillSwitch:
+    @staticmethod
+    def check_triggers(metrics: PerformanceMetrics) -> Tuple[bool, str]:
+        if metrics.current_drawdown_pct > 0.30:
+            return True, f"Drawdown {metrics.current_drawdown_pct*100:.1f}% exceeds 30% limit"
+        if metrics.current_consecutive_losses >= 7:
+            return True, f"{metrics.current_consecutive_losses} consecutive losses"
+        if metrics.total_trades >= 20 and metrics.profit_factor < 0.5:
+            return True, f"Profit Factor {metrics.profit_factor:.2f} below 0.5 threshold"
+        return False, ""
+
+class AdaptiveRiskManager:
+    def __init__(self, data_dir: Path = Path("data_futures"), config_path: Optional[Path] = None):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(exist_ok=True)
+        self.performance_file = self.data_dir / "symbol_performance.json"
+        self.tier_history_file = self.data_dir / "tier_history.json"
+        self.performance_cache: Dict[str, PerformanceMetrics] = {}
+        self.tier_cache: Dict[str, RiskTier] = {}
+        self.kill_switch_active: Dict[str, bool] = {}
+        self._load_state()
+        logger.info("Adaptive Risk Manager initialized")
+    
+    def calculate_position_parameters(self, symbol: str, capital: float, current_price: float, atr: float, trade_history: List[Dict[str, Any]], active_positions: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        if self.kill_switch_active.get(symbol, False):
+            return {"allowed": False, "reason": "Kill switch active", "tier": "KILL_SWITCH"}
+        metrics = PerformanceAnalyzer.calculate_metrics(symbol, trade_history)
+        triggered, reason = KillSwitch.check_triggers(metrics)
+        if triggered:
+            self.kill_switch_active[symbol] = True
+            self._save_state()
+            return {"allowed": False, "reason": f"Kill switch triggered: {reason}", "tier": "KILL_SWITCH"}
+        tier = RiskTierClassifier.classify(metrics)
+        self.performance_cache[symbol] = metrics
+        self.tier_cache[symbol] = tier
+        position_params = PositionSizer.calculate_position_size(capital, tier, metrics, current_price, atr)
+        if active_positions is not None:
+            proposed_risk = atr * position_params["position_size"]
+            allowed, heat_mult, heat_reason = PortfolioRiskMonitor.check_portfolio_heat(active_positions, proposed_risk, capital * 6)
+            if not allowed:
+                return {"allowed": False, "reason": heat_reason, "tier": tier.name}
+            if heat_mult < 1.0:
+                position_params["position_size"] *= heat_mult
+                position_params["notional"] *= heat_mult
+                position_params["portfolio_heat_mult"] = heat_mult
+                position_params["reasoning"] += f" (heat adjusted: {heat_mult:.2f}x)"
+        position_params["metrics"] = {"profit_factor": metrics.profit_factor, "sharpe_ratio": metrics.sharpe_ratio, "win_rate": metrics.win_rate, "max_drawdown": metrics.max_drawdown, "total_trades": metrics.total_trades}
+        self._save_state()
+        return position_params
+    
+    def get_tier_info(self, symbol: str) -> Dict[str, Any]:
+        # Get PROBATION tier as default (last in ALL_TIERS)
+        probation_tier = ALL_TIERS[-1]
+        tier = self.tier_cache.get(symbol, probation_tier)
+        metrics = self.performance_cache.get(symbol)
+        return {"tier": tier.name, "capital_allocation": tier.capital_allocation, "max_leverage": tier.max_leverage, "description": tier.description, "metrics": asdict(metrics) if metrics else None, "kill_switch_active": self.kill_switch_active.get(symbol, False)}
+    
+    def reset_kill_switch(self, symbol: str) -> None:
+        self.kill_switch_active[symbol] = False
+        self._save_state()
+        logger.info(f"Kill switch reset for {symbol}")
+    
+    def _load_state(self) -> None:
+        try:
+            if self.performance_file.exists():
+                with open(self.performance_file) as f:
+                    data = json.load(f)
+                    for symbol, metrics_dict in data.items():
+                        self.performance_cache[symbol] = PerformanceMetrics(**metrics_dict)
+        except Exception as e:
+            logger.warning(f"Failed to load performance cache: {e}")
+    
+    def _save_state(self) -> None:
+        try:
+            with open(self.performance_file, 'w') as f:
+                json.dump({k: asdict(v) for k, v in self.performance_cache.items()}, f, indent=2)
+            tier_data = {symbol: {"current_tier": tier.name, "last_updated": datetime.now(timezone.utc).isoformat()} for symbol, tier in self.tier_cache.items()}
+            with open(self.tier_history_file, 'w') as f:
+                json.dump(tier_data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}")
+
+def create_risk_manager(data_dir: str = "data_futures") -> AdaptiveRiskManager:
+    return AdaptiveRiskManager(data_dir=Path(data_dir))

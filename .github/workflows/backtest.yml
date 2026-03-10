@@ -1,0 +1,56 @@
+name: Weekly Backtest
+
+# Run backtest every Monday at 00:00 UTC
+on:
+  schedule:
+    - cron: '0 0 * * 1'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  backtest:
+    name: Run Grid Bot Backtest
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-backtest-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-backtest-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Create test .env file
+        run: |
+          cat > .env << 'ENVEOF'
+          EXCHANGE_ID=binance
+                                                      placeholder
+          API          API          API             SYMBOL=BTC/USDT
+              NET=true
+                                             require    re     es
+        run: |
+          mkdir -p da          mkdir -p da          m         ata/backtest/results
+                                         me: Run b                                                                     ."           pyt                            ktest    
+            --symbol BTC/USDT \
+                                  1 \
+            --end-date 2024-12-31 \
+                                                                                      est                   on
+                                             
+        run: |
+          python -m src.backtest.backtest_report \
+            --input data/backtest/results/backtest_$(date +%Y%m%d).json \
+            -            -            -        rt_$(date +%Y%m%d            -            -    loa            -            -  se            -            -            -        rt_$(date +%Y%m%dte            -            -            -        rt_$(date +%Y%m%d  da            -                      -            -            -        rt_$(date +%Y%m%dmmary
+        run        run        run        run        run        run        run        run              run        run        run        run        run        run        run        run              run        run        run        run        run        run        run>>        run        run                  run        run        run  ly. Download artifacts for detailed report." >> $GITHUB_STEP_SUMMARY
