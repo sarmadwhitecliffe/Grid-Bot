@@ -48,6 +48,7 @@ data/
 *.db
 *.sqlite
 *.sqlite3
+data_futures/
 
 # Testing
 .pytest_cache/
