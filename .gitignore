@@ -58,3 +58,4 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+data_futures/grid_states.json
