@@ -80,9 +80,14 @@ class CapitalManager:
         self._load()
 
     def _load(self) -> None:
-        """Load capitals from disk."""
+        """Load capitals from disk or initialize from config."""
         if not self.capitals_file.exists():
-            logger.info("No existing capitals file, starting fresh")
+            logger.info("No existing capitals file, initializing from strategy_configs")
+            for symbol, config in self.strategy_configs.items():
+                initial = str(getattr(config, "initial_capital", "1000.00"))
+                self._capitals[symbol] = self._create_default_entry(initial, "PROBATION")
+            # Materialize file immediately so runtime state is visible from startup.
+            self._save()
             return
 
         try:
@@ -437,14 +442,26 @@ class CapitalManager:
 
     def get_all_capitals(self) -> Dict[str, Decimal]:
         """
-        Get all symbol capitals (synchronous, for testing).
+        Get all symbol capitals (synchronous).
+        Includes both persisted capitals and initial capitals for newly configured symbols.
 
         Returns:
             Dict of symbol → capital
         """
-        return {
-            symbol: Decimal(data["capital"]) for symbol, data in self._capitals.items()
-        }
+        result = {}
+        
+        # 1. Start with configured symbols (initial capital)
+        for symbol, config in self.strategy_configs.items():
+            if hasattr(config, 'initial_capital'):
+                result[symbol] = Decimal(str(config.initial_capital))
+            else:
+                result[symbol] = Decimal("1000.00")
+
+        # 2. Overwrite with actual persisted/running capitals
+        for symbol, data in self._capitals.items():
+            result[symbol] = Decimal(data["capital"])
+            
+        return result
 
     def set_critical_alert_callback(self, callback) -> None:
         """Set callback for critical capital alerts."""

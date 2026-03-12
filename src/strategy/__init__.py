@@ -10,6 +10,7 @@ calculator, and the OMS/risk layers.
 
 from dataclasses import dataclass
 from enum import Enum
+from decimal import Decimal
 
 
 class MarketRegime(Enum):
@@ -42,10 +43,10 @@ class RegimeInfo:
     """
 
     regime: MarketRegime
-    adx: float
-    bb_width: float
+    adx: Decimal
+    bb_width: Decimal
     adx_threshold: int
-    bb_width_threshold: float
+    bb_width_threshold: Decimal
     reason: str
 
     @property
@@ -66,7 +67,7 @@ class GridLevel:
         order_size_quote: USDT capital allocated to this level.
     """
 
-    price: float
+    price: Decimal
     side: str
     level_index: int
-    order_size_quote: float
+    order_size_quote: Decimal

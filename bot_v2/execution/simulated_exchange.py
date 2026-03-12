@@ -17,8 +17,10 @@ import ccxt
 import ccxt.async_support as ccxt_async
 import pandas as pd
 
+from config.settings import settings
 from bot_v2.execution.exchange_interface import ExchangeInterface
 from bot_v2.execution.market_data_cache import MarketDataCache
+from bot_v2.execution.order_state_manager import OrderStateManager
 from bot_v2.models.enums import TradeSide
 from bot_v2.models.exceptions import OrderExecutionError
 
@@ -78,6 +80,7 @@ class SimulatedExchange(ExchangeInterface):
         fee: Decimal,
         cache: Optional[MarketDataCache] = None,
         slippage_pct: float = 0.0,
+        order_state_manager: Optional[OrderStateManager] = None,
     ) -> None:
         """
         Initialize simulated exchange.
@@ -85,10 +88,11 @@ class SimulatedExchange(ExchangeInterface):
         Args:
             fee: Trading fee as a decimal (e.g., 0.0004 for 0.04%)
             cache: Optional MarketDataCache instance (created if None)
+            order_state_manager: Unified state manager
         """
         self._fee = fee
         self._slippage_pct = slippage_pct
-        self.open_sim_orders: Dict[str, Dict[str, Any]] = {}
+        self.order_state_manager = order_state_manager
         self._order_id_counter = count()
 
         # Initialize cache (Phase 2: Performance Optimization)
@@ -104,11 +108,12 @@ class SimulatedExchange(ExchangeInterface):
             self.cache = None
             logger.info("Market data cache disabled")
 
+        market_type = settings.MARKET_TYPE.rstrip('s') if settings.MARKET_TYPE.endswith('s') else settings.MARKET_TYPE
         self.public_exchange = ccxt_async.binance(
             {
-                "options": {"defaultType": "future"},
+                "options": {"defaultType": market_type},
                 "enableRateLimit": True,  # Enable rate limiting for public API
-                "rateLimit": 50,  # Fast rate limit for simulation mode (real exchange would use 1000)
+                "rateLimit": 1000,  # Fast rate limit for simulation mode (real exchange would use 1000)
             }
         )
         logger.info(f"SimulatedExchange initialized with fee: {fee}")
@@ -142,15 +147,20 @@ class SimulatedExchange(ExchangeInterface):
 
     def format_market_id(self, symbol: str) -> Optional[str]:
         """
-        Return symbol as-is for simulated exchange.
+        Convert symbol to exchange-specific market ID.
 
         Args:
             symbol: Symbol in standard format (e.g., "BTC/USDT")
 
         Returns:
-            Same symbol (simulated exchange doesn't need conversion)
+            Exchange-specific market ID or original symbol if mapping fails.
         """
-        return symbol
+        try:
+            if self.public_exchange.markets and symbol in self.public_exchange.markets:
+                return self.public_exchange.market(symbol)["id"]
+            return symbol
+        except Exception:
+            return symbol
 
     async def get_market_price(self, market_id: str) -> Optional[Decimal]:
         """
@@ -277,7 +287,7 @@ class SimulatedExchange(ExchangeInterface):
         if params is None:
             params = {}
 
-        logger.info(
+        logger.debug(
             f"LOCAL_SIM: Creating simulated limit {side.value} order: {amount} @ {price} for {market_id}"
         )
 
@@ -299,44 +309,50 @@ class SimulatedExchange(ExchangeInterface):
                 "currency": "USDT",
             },
         }
-        # Store for fill simulation
-        self.open_sim_orders[simulated_order["id"]] = simulated_order
+        # Store for fill simulation (Now handled by OrderStateManager)
         return simulated_order
 
-    async def check_fills(self, market_id: str, current_price: Decimal) -> List[str]:
+    async def check_fills(
+        self,
+        market_id: str,
+        current_price: Decimal,
+        candle_high: Optional[Decimal] = None,
+        candle_low: Optional[Decimal] = None,
+    ) -> List[str]:
         """
         Check if any open simulated orders should be filled at the current price.
         Returns a list of filled order IDs.
         """
+        if not self.order_state_manager:
+            return []
+            
         filled_ids = []
-        for oid, order in list(self.open_sim_orders.items()):
-            if order["symbol"] != market_id or order["status"] != "open":
-                continue
-
-            order_price = Decimal(order["price"])
-            side = order["side"].lower()
+        # Use candle range when available so limit orders fill on intrabar touches.
+        # Fallback to point-in-time price for backward compatibility.
+        trigger_high = candle_high if candle_high is not None else current_price
+        trigger_low = candle_low if candle_low is not None else current_price
+        open_sim_records = [
+            r for r in self.order_state_manager.get_open_orders()
+            if r.mode == "local_sim" and r.symbol.replace("/", "") == market_id.replace("/", "")
+        ]
+        
+        for record in open_sim_records:
+            order_price = Decimal(str(record.avg_price or record.raw_response.get("price", "0")))
+            side = record.side.lower()
 
             should_fill = False
-            if side == "buy" and current_price <= order_price:
+            if side == "buy" and trigger_low <= order_price:
                 should_fill = True
-            elif side == "sell" and current_price >= order_price:
+            elif side == "sell" and trigger_high >= order_price:
                 should_fill = True
 
             if should_fill:
                 logger.info(
-                    f"LOCAL_SIM: Order FILLED: {oid} {side} @ {order_price} (Market: {current_price})"
+                    f"LOCAL_SIM: Order FILLED: {record.exchange_order_id} {side} @ {order_price} "
+                    f"(Range: {trigger_low}-{trigger_high}, Last: {current_price})"
                 )
-                order["status"] = "closed"
-                order["filled"] = order["amount"]
-                order["remaining"] = "0"
-                order["average"] = order["price"]
-                # Calculate fee
-                cost = Decimal(order["amount"]) * order_price
-                order["cost"] = str(cost)
-                order["fee"]["cost"] = str(cost * self._fee)
-                filled_ids.append(oid)
-                # Remove from open tracking
-                del self.open_sim_orders[oid]
+                if record.exchange_order_id:
+                    filled_ids.append(record.exchange_order_id)
 
         return filled_ids
 

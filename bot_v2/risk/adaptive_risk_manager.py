@@ -1415,6 +1415,10 @@ class AdaptiveRiskManager:
         except Exception as e:
             logger.warning(f"Failed to load performance cache: {e}")
 
+        if not self.performance_file.exists():
+            self._save_state()
+            logger.info("Initialized symbol_performance.json")
+
         # Tier history now managed by CapitalManager (no separate file loading needed)
 
     def _get_tier_history_sync(self, symbol: str) -> Dict[str, Any]:

@@ -35,10 +35,11 @@ post_date: "2026-02-22"
 
 ## Milestone Log
 
-### 2026-03-09
-- **Performance & Safety:** Finalized high-frequency optimizations (O(N) backtester) and "Quick-Bank" safety guards (5% TP / 7% DD).
-- **Architecture Shift:** Initiated integration of Grid Trading logic into the production-grade `bot_v2` modular framework.
-- **Execution Layer Upgrade:** Updated `ExchangeInterface`, `LiveExchange`, `SimulatedExchange`, and `OrderManager` to fully support limit orders, enabling precise grid placement.
-- **Webhook Integration Plan:** mapped `webhook_server.py` capabilities to support remote `grid_start` and `grid_stop` commands.
-- **Production Runner:** Updated `run_grid_bot.sh` to point to `webhook_server.py` and handle `.venv` activation correctly.
-- **Dependency Management:** Added `fastapi` and `uvicorn` to `requirements.txt` for production server support.
+### 2026-03-10
+- **Phase 5 Hardening (Production Readiness):**
+  - **Unified Order Tracking:** Refactored `OrderManager`, `SimulatedExchange`, and `GridOrchestrator` to use a single persistent `OrderStateManager`. Fixed "split-brain" tracking where orders were forgotten on restart.
+  - **Portfolio-Level Risk:** Implemented `GlobalRiskManager` with a 20% total account drawdown kill switch.
+  - **Decimal Precision Refactor:** Replaced all `float` calculations in the trading path with `Decimal` to eliminate rounding drift and prevent order rejection.
+  - **Async IO & Atomic Persistence:** Implemented non-blocking background thread saving and `asyncio.Lock` for all state files to prevent heartbeat freezes and data corruption.
+  - **Resilience Verification:** Successfully passed adversarial stress tests involving process killing and state recovery.
+  - **Grid Sizing:** Fully integrated Adaptive Risk Tiers into Grid deployment (e.g., 30% probation sizing).

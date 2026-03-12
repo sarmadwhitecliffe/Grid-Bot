@@ -50,7 +50,6 @@ class OrderManager:
             order_state_manager: Optional pre-initialized OrderStateManager
         """
         self.exchange = exchange
-        self.pending_orders: Dict[str, Dict[str, Any]] = {}  # order_id -> order_info
 
         # Initialize order state manager for live order tracking
         if order_state_manager:
@@ -156,14 +155,12 @@ class OrderManager:
 
     async def create_market_order(
         self,
-        symbol_id: Optional[str] = None,
-        side: TradeSide = None,
-        amount: Decimal = None,
+        symbol_id: str,
+        side: TradeSide,
+        amount: Decimal,
         params: Optional[Dict[str, Any]] = None,
         config: Optional[Any] = None,
         current_price: Optional[Decimal] = None,
-        symbol: Optional[str] = None,
-        quantity: Optional[Decimal] = None,
     ) -> Dict[str, Any]:
         """
         Create a market order with safety checks.
@@ -182,9 +179,76 @@ class OrderManager:
         Raises:
             OrderExecutionError: If order creation fails or safety checks fail
         """
-        # ... (rest of market order implementation) ...
-        # (I will keep the logic same but wrap it in a helper later if needed)
-        # For now, I'll just add the limit order method below.
+        if amount <= Decimal("0"):
+            raise OrderExecutionError(f"Invalid order amount: {amount}")
+
+        # Get exchange-specific market ID
+        market_id = self.exchange.format_market_id(symbol_id)
+        if market_id is None:
+            raise OrderExecutionError(f"Invalid symbol: {symbol_id}")
+
+        # Calculate notional for safety checks
+        price = current_price
+        if price is None:
+            price = await self.get_current_price(symbol_id)
+        
+        if price:
+            notional = amount * price
+        else:
+            logger.warning(f"Could not calculate notional for market order: price missing")
+            notional = Decimal("0")
+
+        # Safety checks (for live mode)
+        if config and config.mode == "live" and notional > 0:
+            passes, error_msg = self._check_safety_limits(symbol_id, notional, config)
+            if not passes:
+                logger.warning(f"Safety check FAILED: {error_msg}")
+                raise OrderExecutionError(f"Safety check failed: {error_msg}")
+
+        # Generate local order ID
+        local_id = f"local_market_{uuid.uuid4().hex[:8]}"
+
+        try:
+            # Execute order through exchange
+            order = await self.exchange.create_market_order(
+                market_id=market_id,
+                side=side,
+                amount=amount,
+                params=params or {},
+            )
+
+            if not order:
+                raise OrderExecutionError(f"Market order for {symbol_id} returned None")
+
+            # Add local ID and metadata
+            order["_local_id"] = local_id
+            order["_notional"] = str(notional)
+
+            # Persist to OrderStateManager
+            mode = "live" if config and config.mode == "live" else "local_sim"
+            order_record = OrderRecord.from_exchange_response(
+                local_id=local_id, exchange_response=order, mode=mode
+            )
+            await self.order_state_manager.add_order(order_record)
+
+            if mode == "live" and notional > 0:
+                self._update_daily_counters(symbol_id, notional)
+
+            logger.info(
+                f"Market order created successfully [{local_id}]: {order.get('id', 'unknown')} - "
+                f"{symbol_id} {side.value} {amount}"
+            )
+
+            return order
+
+        except Exception as e:
+            logger.error(
+                f"Market order creation failed for {symbol_id}: {e}",
+                exc_info=True,
+            )
+            raise OrderExecutionError(
+                f"Failed to create market order for {symbol_id}: {e}"
+            ) from e
 
     async def create_limit_order(
         self,
@@ -250,30 +314,30 @@ class OrderManager:
             order["_local_id"] = local_id
             order["_notional"] = str(notional)
 
-            # Track order in pending orders
-            order_id = order.get("id", "unknown")
-            self.pending_orders[order_id] = {
-                "symbol_id": symbol_id,
-                "side": side,
-                "amount": amount,
-                "price": price,
-                "order": order,
-                "created_at": datetime.now(timezone.utc),
-                "local_id": local_id,
-            }
+            # Persist to OrderStateManager for all modes
+            mode = "live" if config and config.mode == "live" else "local_sim"
+            order_record = OrderRecord.from_exchange_response(
+                local_id=local_id, exchange_response=order, mode=mode
+            )
+            # Add grid metadata if available in params
+            if params:
+                order_record.grid_id = params.get("grid_id")
+                order_record.level_index = params.get("level_index")
+                order_record.metadata = params.get("metadata")
 
-            # For live mode, persist to OrderStateManager
-            if config and config.mode == "live":
-                order_record = OrderRecord.from_exchange_response(
-                    local_id=local_id, exchange_response=order, mode="live"
-                )
-                self.order_state_manager.add_order(order_record)
+            await self.order_state_manager.add_order(order_record)
+
+            if mode == "live":
                 self._update_daily_counters(symbol_id, notional)
 
-            logger.info(
-                f"Limit order created successfully [{local_id}]: {order_id} - "
+            message = (
+                f"Limit order created successfully [{local_id}]: {order.get('id', 'unknown')} - "
                 f"{symbol_id} {side.value} {amount} @ {price}"
             )
+            if mode == "live":
+                logger.info(message)
+            else:
+                logger.debug(message)
 
             return order
 
@@ -310,25 +374,38 @@ class OrderManager:
             logger.error(f"Failed to fetch price for {symbol_id}: {e}")
             return None
 
-    def clear_order_tracking(self, order_id: str) -> None:
+    async def clear_order_tracking(self, order_id: str) -> None:
         """
-        Remove order from pending tracking.
+        Mark order as closed in state.
 
         Args:
-            order_id: Order ID to remove
+            order_id: Exchange Order ID to clear
         """
-        if order_id in self.pending_orders:
-            del self.pending_orders[order_id]
-            logger.debug(f"Cleared tracking for order {order_id}")
+        record = self.order_state_manager.get_order_by_exchange_id(order_id)
+        if record:
+            await self.order_state_manager.update_order_status(record.local_id, "CLOSED")
+            logger.debug(f"Cleared tracking for order {order_id} (local_id={record.local_id})")
 
     def get_pending_orders(self) -> Dict[str, Dict[str, Any]]:
         """
-        Get all pending orders.
+        Get all open orders from state manager.
 
         Returns:
-            Dict mapping order_id to order info
+            Dict mapping exchange_order_id to order info
         """
-        return self.pending_orders.copy()
+        open_records = self.order_state_manager.get_open_orders()
+        pending = {}
+        for r in open_records:
+            if r.exchange_order_id:
+                pending[r.exchange_order_id] = {
+                    "symbol_id": r.symbol,
+                    "side": TradeSide.BUY if r.side == "BUY" else TradeSide.SELL,
+                    "amount": Decimal(r.quantity),
+                    "price": Decimal(r.avg_price) if r.avg_price else Decimal("0"),
+                    "local_id": r.local_id,
+                    "grid_id": r.grid_id
+                }
+        return pending
 
     def get_order_state_stats(self) -> Dict[str, Any]:
         """
@@ -344,8 +421,8 @@ class OrderManager:
 
         Returns True when cancellation/cleanup succeeds, False otherwise.
         """
-        order_info = self.pending_orders.get(order_id, {})
-        target_symbol = symbol_id or order_info.get("symbol_id")
+        record = self.order_state_manager.get_order_by_exchange_id(order_id)
+        target_symbol = symbol_id or (record.symbol if record else None)
 
         try:
             # Prefer explicit exchange cancel API when available.
@@ -367,11 +444,8 @@ class OrderManager:
                 # Local simulation fallback: remove from simulated open orders.
                 self.exchange.open_sim_orders.pop(order_id, None)
 
-            if order_id in self.pending_orders:
-                local_id = self.pending_orders[order_id].get("local_id")
-                if local_id:
-                    self.order_state_manager.update_order_status(local_id, "CANCELLED")
-                self.clear_order_tracking(order_id)
+            if record:
+                await self.order_state_manager.update_order_status(record.local_id, "CANCELLED")
 
             logger.info(f"Order cancellation cleanup complete for {order_id}")
             return True
@@ -380,19 +454,18 @@ class OrderManager:
             return False
 
     async def cancel_orders_for_symbol(self, symbol_id: str) -> int:
-        """Cancel all currently tracked pending orders for a symbol.
+        """Cancel all currently tracked open orders for a symbol.
 
         Returns the number of orders successfully cancelled/cleaned up.
         """
-        symbol_order_ids = [
-            oid for oid, info in self.pending_orders.items() if info.get("symbol_id") == symbol_id
-        ]
-
-        if not symbol_order_ids:
+        open_records = self.order_state_manager.get_open_orders_by_symbol(symbol_id)
+        if not open_records:
             return 0
 
+        order_ids = [r.exchange_order_id for r in open_records if r.exchange_order_id]
+        
         results = await asyncio.gather(
-            *[self.cancel_order(oid, symbol_id=symbol_id) for oid in symbol_order_ids],
+            *[self.cancel_order(oid, symbol_id=symbol_id) for oid in order_ids],
             return_exceptions=True,
         )
         cancelled = 0
@@ -400,7 +473,7 @@ class OrderManager:
             if result is True:
                 cancelled += 1
 
-        logger.info(f"Cancelled/cleaned {cancelled}/{len(symbol_order_ids)} orders for {symbol_id}")
+        logger.info(f"Cancelled/cleaned {cancelled}/{len(order_ids)} orders for {symbol_id}")
         return cancelled
 
     async def reconcile_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:

@@ -5,6 +5,7 @@ Tests bot initialization, signal handling, position management, and lifecycle.
 """
 
 import os
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -629,6 +630,57 @@ class TestStatePersistence:
         assert len(loaded_positions) == 1
         assert "BTCUSDT" in loaded_positions
         assert loaded_positions["BTCUSDT"].symbol_id == "BTCUSDT"
+
+    @pytest.mark.asyncio
+    async def test_persist_state_saves_grid_exposure_snapshot(self, bot):
+        """Test that _persist_state writes grid exposure runtime values."""
+        orchestrator = MagicMock()
+        orchestrator.is_active = True
+        orchestrator.centre_price = Decimal("50000")
+        orchestrator.grid_order_ids = {"order-1", "order-2"}
+        orchestrator.session_fill_count = 3
+        orchestrator.session_buy_qty = Decimal("0.020")
+        orchestrator.session_sell_qty = Decimal("0.015")
+        orchestrator.session_realized_pnl_quote = Decimal("12.5")
+        bot.grid_orchestrators = {"BTCUSDT": orchestrator}
+
+        await bot._persist_state()
+
+        with open(bot.state_manager.grid_exposure_file, "r", encoding="utf-8") as f:
+            exposure = json.load(f)
+
+        assert "BTCUSDT" in exposure
+        snapshot = exposure["BTCUSDT"]
+        assert snapshot["is_active"] is True
+        assert snapshot["centre_price"] == "50000"
+        assert snapshot["open_order_count"] == 2
+        assert snapshot["session_fill_count"] == 3
+        assert snapshot["session_buy_qty"] == "0.020"
+        assert snapshot["session_sell_qty"] == "0.015"
+        assert snapshot["session_realized_pnl_quote"] == "12.5"
+
+    @pytest.mark.asyncio
+    async def test_persist_state_includes_inactive_grid_session(self, bot):
+        """Test that stopped grid sessions are still persisted with is_active=False."""
+        orchestrator = MagicMock()
+        orchestrator.is_active = False
+        orchestrator.centre_price = Decimal("50000")
+        orchestrator.grid_order_ids = set()
+        orchestrator.order_metadata = {}
+        orchestrator.session_fill_count = 4
+        orchestrator.session_buy_qty = Decimal("0")
+        orchestrator.session_sell_qty = Decimal("0.010")
+        orchestrator.session_realized_pnl_quote = Decimal("15.0")
+        bot.grid_orchestrators = {"BTCUSDT": orchestrator}
+
+        await bot._persist_state()
+
+        grid_states = bot.state_manager.load_grid_states()
+        assert "BTCUSDT" in grid_states
+        persisted = grid_states["BTCUSDT"]
+        assert persisted.is_active is False
+        assert persisted.active_orders == {}
+        assert persisted.grid_fills == 4
 
 
 class TestExitOrderRetry:

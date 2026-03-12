@@ -8,6 +8,7 @@ Manages loading and saving of trading bot state to JSON files:
 - Strategy configurations
 
 Provides atomic writes, error handling, and data validation.
+Includes Write-Ahead Logging (WAL) for crash recovery.
 """
 
 import json
@@ -23,6 +24,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from bot_v2.models.position import Position
 from bot_v2.models.strategy_config import StrategyConfig
 from bot_v2.utils.decimal_utils import DecimalEncoder
+from src.persistence.wal import WALManager, WALOperationType
+from src.persistence.transaction import TransactionManager, AtomicStateStore
+from src.persistence.validator import (
+    StateValidator,
+    DataRecoveryManager,
+    ValidationReport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,26 +47,76 @@ class StateManager:
     - Atomic writes with error handling
     """
 
-    def __init__(self, data_dir: Path = Path("data_futures")) -> None:
+    def __init__(
+        self,
+        data_dir: Path = Path("data_futures"),
+        enable_wal: bool = True,
+        enable_transactions: bool = True,
+    ) -> None:
         """
         Initialize state manager.
 
         Args:
             data_dir: Directory for data files (default: data_futures/)
+            enable_wal: Enable Write-Ahead Logging for crash recovery (default: True)
+            enable_transactions: Enable atomic transactions (default: True)
         """
         self.data_dir = data_dir
         self.data_dir.mkdir(exist_ok=True)
+
+        self.enable_wal = enable_wal
+        self.enable_transactions = enable_transactions
 
         self.positions_file = self.data_dir / "active_positions.json"
         self.capitals_file = self.data_dir / "symbol_capitals.json"
         self.history_file = self.data_dir / "trade_history.json"
         self.grid_state_file = self.data_dir / "grid_states.json"
+        self.grid_history_file = self.data_dir / "grid_trade_history.json"
+        self.grid_exposure_file = self.data_dir / "grid_exposure.json"
+        self.fill_log_file = self.data_dir / "fill_log.jsonl"
         self.strategy_configs_file = Path("config") / "strategy_configs.json"
 
         self.save_count = 0  # Counter for condensing save logs
         self._io_lock = threading.Lock()
+        self._ensure_runtime_files()
+
+        if self.enable_wal:
+            self.wal_manager = WALManager(data_dir=self.data_dir)
+            logger.info(f"StateManager WAL enabled, data_dir: {self.data_dir}")
+        else:
+            self.wal_manager = None
+
+        if self.enable_transactions:
+            self.transaction_manager = TransactionManager(
+                journal_dir=self.data_dir / "wal" / "journal"
+            )
+            self.atomic_store = AtomicStateStore(
+                self, self.wal_manager, checkpoint_on_commit=True
+            )
+            logger.info(f"StateManager transactions enabled")
+        else:
+            self.transaction_manager = None
+            self.atomic_store = None
 
         logger.info(f"StateManager initialized with data_dir: {self.data_dir}")
+
+    def _ensure_runtime_files(self) -> None:
+        """Create core runtime files if missing to keep state shape predictable."""
+        defaults = {
+            self.positions_file: {},
+            self.history_file: [],
+            self.grid_state_file: {},
+            self.grid_history_file: [],
+            self.grid_exposure_file: {},
+        }
+        for path, default_data in defaults.items():
+            if path.exists():
+                continue
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(default_data, f, indent=2, cls=DecimalEncoder)
+            except Exception as e:
+                logger.error(f"Failed to initialize runtime file {path}: {e}")
 
     def _load_json(self, file_path: Path, default_factory: Callable[[], Any]) -> Any:
         """
@@ -98,7 +156,9 @@ class StateManager:
                         f"Renamed corrupt file {file_path} -> {corrupted_snapshot}"
                     )
                 except Exception as rename_exc:
-                    logger.error(f"Failed to rename corrupt file {file_path}: {rename_exc}")
+                    logger.error(
+                        f"Failed to rename corrupt file {file_path}: {rename_exc}"
+                    )
                 # Recreate a fresh file with default content to avoid repeated failures
                 try:
                     default_val = default_factory()
@@ -123,7 +183,9 @@ class StateManager:
 
                 # Write atomically: write to a temp file in same directory, fsync, then replace
                 fd, tmp_path = tempfile.mkstemp(
-                    dir=str(file_path.parent), prefix=file_path.name + ".", suffix=".tmp"
+                    dir=str(file_path.parent),
+                    prefix=file_path.name + ".",
+                    suffix=".tmp",
                 )
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -271,9 +333,18 @@ class StateManager:
         capitals_raw = self._load_json(self.capitals_file, dict)
 
         capitals = {}
-        for symbol, cap_str in capitals_raw.items():
+        for symbol, cap_value in capitals_raw.items():
             try:
-                capitals[symbol] = Decimal(str(cap_str))
+                # Support both formats:
+                # 1) legacy: {"BTC/USDT": "2000.0"}
+                # 2) current: {"BTC/USDT": {"capital": "2000.0", ...}}
+                if isinstance(cap_value, dict):
+                    cap_field = cap_value.get("capital")
+                    if cap_field is None:
+                        raise ValueError("missing 'capital' field")
+                    capitals[symbol] = Decimal(str(cap_field))
+                else:
+                    capitals[symbol] = Decimal(str(cap_value))
             except Exception as e:
                 logger.error(f"Failed to load capital for {symbol}: {e}")
                 continue
@@ -297,7 +368,7 @@ class StateManager:
         Load active grid sessions from persistent storage.
         """
         from bot_v2.models.grid_state import GridState
-        
+
         raw_states = self._load_json(self.grid_state_file, dict)
         grid_states = {}
         for symbol, data in raw_states.items():
@@ -305,38 +376,168 @@ class StateManager:
                 grid_states[symbol] = GridState.from_dict(data)
             except Exception as e:
                 logger.error(f"Failed to load grid state for {symbol}: {e}")
-        
+
         return grid_states
+
+    def load_grid_trade_history(self) -> List[Dict[str, Any]]:
+        """Load closed grid-trade records from persistent storage."""
+        history = self._load_json(self.grid_history_file, list)
+        logger.info(f"Loaded {len(history)} grid trade history entries")
+        return history
 
     def save_grid_states(self, grid_states: Dict[str, Any]) -> None:
         """
         Save active grid sessions to persistent storage.
         """
         serialized = {s: state.to_dict() for s, state in grid_states.items()}
+
+        if self.wal_manager:
+            self.wal_manager.log_state_save(
+                "grid_states",
+                {"count": len(grid_states), "symbols": list(grid_states.keys())},
+            )
+
         self._save_json(serialized, self.grid_state_file)
         logger.debug(f"Saved grid states for {len(grid_states)} symbols")
 
+    def save_grid_trade_history(self, history: List[Dict[str, Any]]) -> None:
+        """Save closed grid-trade records to persistent storage."""
+        if self.wal_manager:
+            self.wal_manager.log_state_save(
+                "grid_trade_history", {"count": len(history)}
+            )
+
+        self._save_json(history, self.grid_history_file)
+        if len(history) > 0:
+            logger.info(f"Saved {len(history)} grid trade history entries")
+        else:
+            logger.debug("Saved grid trade history (empty)")
+
+    def save_grid_exposure_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Save latest runtime grid exposure snapshot by symbol."""
+        if self.wal_manager:
+            self.wal_manager.log_state_save(
+                "grid_exposure", {"symbols": list(snapshot.keys())}
+            )
+
+        self._save_json(snapshot, self.grid_exposure_file)
+        logger.debug(f"Saved grid exposure snapshot for {len(snapshot)} symbols")
+
+    def append_fill_log_event(self, event: Dict[str, Any]) -> None:
+        """Append one grid fill event as JSONL for durable event auditing."""
+        try:
+            if self.wal_manager:
+                self.wal_manager.log_fill(event)
+
+            with self._io_lock:
+                self.fill_log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.fill_log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(event, cls=DecimalEncoder))
+                    f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+        except (IOError, TypeError, OSError) as e:
+            logger.error(f"Error appending fill log event: {e}", exc_info=True)
+
     def load_states(
         self,
-    ) -> Tuple[Dict[str, Position], Dict[str, Decimal], List[Dict[str, Any]], Dict[str, Any]]:
+    ) -> Tuple[
+        Dict[str, Position],
+        Dict[str, Decimal],
+        List[Dict[str, Any]],
+        Dict[str, Any],
+        List[Dict[str, Any]],
+    ]:
         """
         Load all bot state from persistent storage.
 
         Returns:
-            Tuple of (active_positions, symbol_capitals, trade_history, grid_states)
+            Tuple of (active_positions, symbol_capitals, trade_history, grid_states, grid_trade_history)
         """
         positions = self.load_positions()
         capitals = self.load_capitals()
         history = self.load_trade_history()
         grid_states = self.load_grid_states()
+        grid_history = self.load_grid_trade_history()
 
         logger.info(
             f"Loaded all states: {len(positions)} positions, "
             f"{len(capitals)} capitals, {len(history)} history entries, "
-            f"{len(grid_states)} grid states"
+            f"{len(grid_states)} grid states, {len(grid_history)} grid history entries"
         )
 
-        return positions, capitals, history, grid_states
+        return positions, capitals, history, grid_states, grid_history
+
+    def get_wal_recovery_info(self) -> Dict[str, Any]:
+        """
+        Get WAL recovery information.
+
+        Returns:
+            Dictionary with WAL status and recovery info
+        """
+        if not self.wal_manager:
+            return {"enabled": False}
+
+        return {
+            "enabled": True,
+            **self.wal_manager.get_recovery_info(),
+        }
+
+    def create_checkpoint(self) -> Optional[str]:
+        """
+        Create a checkpoint of current state.
+
+        Returns:
+            Checkpoint ID if successful, None otherwise
+        """
+        if not self.wal_manager:
+            logger.warning("WAL not enabled, cannot create checkpoint")
+            return None
+
+        try:
+            positions = self.load_positions()
+            capitals = self.load_capitals()
+            history = self.load_trade_history()
+            grid_states = self.load_grid_states()
+            grid_history = self.load_grid_trade_history()
+
+            state_snapshot = {
+                "positions": {s: p.to_dict() for s, p in positions.items()},
+                "capitals": {s: str(c) for s, c in capitals.items()},
+                "history": history,
+                "grid_states": {s: state.to_dict() for s, state in grid_states.items()},
+                "grid_history": grid_history,
+            }
+
+            checkpoint_id = self.wal_manager.create_checkpoint(state_snapshot)
+            logger.info(f"Created checkpoint: {checkpoint_id}")
+            return checkpoint_id
+        except Exception as e:
+            logger.error(f"Failed to create checkpoint: {e}")
+            return None
+
+    def validate_state(self, auto_reconcile: bool = True) -> ValidationReport:
+        """
+        Validate all state data for integrity issues.
+
+        Args:
+            auto_reconcile: If True, attempt automatic reconciliation of issues
+
+        Returns:
+            ValidationReport with validation results
+        """
+        recovery_manager = DataRecoveryManager(data_dir=self.data_dir)
+        return recovery_manager.validate_and_recover(auto_reconcile=auto_reconcile)
+
+    def reconcile_fills(self) -> Dict[str, Any]:
+        """
+        Reconcile fills to identify orphaned entries and calculate PnL.
+
+        Returns:
+            Dictionary with reconciliation results
+        """
+        validator = StateValidator(data_dir=self.data_dir)
+        return validator.reconcile_fills()
 
     def load_strategy_configs(self) -> Dict[str, StrategyConfig]:
         """
@@ -349,8 +550,7 @@ class StateManager:
 
         if not main_configs_raw:
             logger.critical(
-                f"Primary config file '{self.strategy_configs_file}' "
-                f"empty or invalid."
+                f"Primary config file '{self.strategy_configs_file}' empty or invalid."
             )
             return {}
 
@@ -389,6 +589,11 @@ class StateManager:
             positions: Dictionary mapping symbol to Position objects
         """
         serialized = {symbol: pos.to_dict() for symbol, pos in positions.items()}
+
+        if self.wal_manager:
+            for symbol, pos in positions.items():
+                self.wal_manager.log_position_update(symbol, pos.to_dict())
+
         self._save_json(serialized, self.positions_file)
         self.save_count += 1
         if self.save_count % 10 == 0:  # Log every 10th save to reduce verbosity
@@ -404,6 +609,10 @@ class StateManager:
             capitals: Dictionary mapping symbol to capital (Decimal)
         """
         serialized = {symbol: str(cap) for symbol, cap in capitals.items()}
+
+        if self.wal_manager:
+            self.wal_manager.log_state_save("capitals", serialized)
+
         self._save_json(serialized, self.capitals_file)
         # Use debug level to reduce verbosity (capitals change infrequently)
         logger.debug(f"Saved capitals for {len(capitals)} symbols")
@@ -415,6 +624,11 @@ class StateManager:
         Args:
             history: List of trade history entries (dicts)
         """
+        if self.wal_manager and len(history) > 0:
+            self.wal_manager.log_state_save(
+                "history", {"count": len(history), "entries": history}
+            )
+
         self._save_json(history, self.history_file)
         # Only log at INFO when there are actual entries to avoid noise
         if len(history) > 0:
@@ -511,29 +725,33 @@ class StateManager:
         Count the number of daily overrides for a scope (symbol) today.
         Non-expired overrides only (expired ones are ignored).
         Backward compatible: handles both old single-key and new sequenced formats.
-        
+
         Args:
             day_key: Date key (e.g., '20260307_UTC')
             scope_key_prefix: Base symbol (e.g., 'XRPUSDT') or "GLOBAL" without sequence suffix
-            
+
         Returns:
             Count of non-expired overrides matching the prefix
         """
         overrides = self._load_second_trade_overrides()
         day_bucket = overrides.get(day_key, {})
-        
+
         count = 0
-        
+
         # Check for old-format single key (backward compat)
-        if scope_key_prefix in day_bucket and not day_bucket[scope_key_prefix].get("expired", False):
+        if scope_key_prefix in day_bucket and not day_bucket[scope_key_prefix].get(
+            "expired", False
+        ):
             count += 1
-        
+
         # Check for new-format sequenced keys
         for key, entry in day_bucket.items():
             # Check if key matches pattern: XRPUSDT_1, XRPUSDT_2, etc.
-            if key.startswith(f"{scope_key_prefix}_") and not entry.get("expired", False):
+            if key.startswith(f"{scope_key_prefix}_") and not entry.get(
+                "expired", False
+            ):
                 count += 1
-        
+
         return count
 
     def get_first_unconsumed_override(
@@ -542,24 +760,26 @@ class StateManager:
         """
         Get the first unconsumed override for a scope (FIFO).
         Backward compatible: checks both old single-key format and new sequenced format.
-        
+
         Args:
             day_key: Date key (e.g., '20260307_UTC')
             scope_key_prefix: Base symbol or "GLOBAL" without sequence suffix
-            
+
         Returns:
             First unconsumed override dict, or None
         """
         overrides = self._load_second_trade_overrides()
         day_bucket = overrides.get(day_key, {})
-        
+
         # First, try backward compatibility: check for exact key match (old format)
         if scope_key_prefix in day_bucket:
             entry = day_bucket[scope_key_prefix]
             if not entry.get("consumed", False) and not entry.get("expired", False):
-                entry["_scope_key"] = scope_key_prefix  # Store key for consumption tracking
+                entry["_scope_key"] = (
+                    scope_key_prefix  # Store key for consumption tracking
+                )
                 return entry
-        
+
         # New format: look for sequenced keys (XRPUSDT_1, XRPUSDT_2, etc.)
         # Sort by numeric suffix to preserve FIFO when sequence reaches 10+.
         def _sequence_num(key: str) -> int:
@@ -577,12 +797,12 @@ class StateManager:
             ],
             key=_sequence_num,
         )
-        
+
         for key in matching_keys:
             entry = day_bucket[key]
             if not entry.get("consumed", False) and not entry.get("expired", False):
                 # Return with the key for consumption tracking
                 entry["_scope_key"] = key  # Store key for consume operation
                 return entry
-        
+
         return None

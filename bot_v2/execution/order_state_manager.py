@@ -5,10 +5,14 @@ Maintains a persistent cache of all live orders synchronized with the exchange.
 Provides reconciliation capabilities to detect missing/stale orders.
 """
 
+import asyncio
 import json
 import logging
+import os
+import tempfile
+from copy import deepcopy
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -52,6 +56,9 @@ class OrderRecord:
     fees: str = "0"
     pnl: Optional[str] = None
     mode: str = "local_sim"  # local_sim, live
+    grid_id: Optional[str] = None  # To associate with a specific grid session
+    level_index: Optional[int] = None  # To identify the level in the grid
+    metadata: Optional[Dict[str, Any]] = None  # For generic extension
     verification_status: Optional[str] = None  # VERIFIED, UNVERIFIED
     verification_error: Optional[str] = None
     raw_response: Optional[Dict[str, Any]] = None  # Raw exchange response
@@ -145,12 +152,98 @@ class OrderStateManager:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.orders_file = self.data_dir / "orders_state.json"
+        self._lock = asyncio.Lock()
+        self._retention_hours = self._read_positive_int_env(
+            "BOTV2_ORDER_STATE_RETENTION_HOURS",
+            24,
+        )
+        self._prune_statuses = self._read_prune_statuses_env(
+            "BOTV2_ORDER_STATE_PRUNE_STATUSES",
+            {
+                "FILLED",
+                "CANCELLED",
+                "CLOSED",
+                "REJECTED",
+                "EXPIRED",
+                "STALE",
+            },
+        )
+        self._archive_strip_raw_response = self._read_bool_env(
+            "BOTV2_ARCHIVE_STRIP_RAW_RESPONSE",
+            True,
+        )
 
         # In-memory state
         self._orders: Dict[str, Dict[str, Any]] = {}
 
         # Load existing state
         self._load()
+
+    @staticmethod
+    def _read_positive_int_env(key: str, default: int) -> int:
+        """Read a positive integer from env var with safe fallback."""
+        raw_value = os.getenv(key)
+        if raw_value is None:
+            return default
+
+        try:
+            parsed = int(raw_value)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+
+        logger.warning("Invalid %s=%r, using default=%s", key, raw_value, default)
+        return default
+
+    @staticmethod
+    def _read_prune_statuses_env(key: str, default: set[str]) -> set[str]:
+        """Read comma-separated order statuses for archival eligibility."""
+        raw_value = os.getenv(key)
+        if raw_value is None:
+            return default
+
+        statuses = {item.strip().upper() for item in raw_value.split(",") if item.strip()}
+        if statuses:
+            return statuses
+
+        logger.warning("Invalid %s=%r, using default statuses", key, raw_value)
+        return default
+
+    @staticmethod
+    def _read_bool_env(key: str, default: bool) -> bool:
+        """Read a bool-like env var value with fallback."""
+        raw_value = os.getenv(key)
+        if raw_value is None:
+            return default
+
+        normalized = raw_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+
+        logger.warning("Invalid %s=%r, using default=%s", key, raw_value, default)
+        return default
+
+    @staticmethod
+    def _parse_iso_datetime(timestamp: Optional[str]) -> Optional[datetime]:
+        """Parse ISO datetime strings, including trailing Z notation."""
+        if not timestamp:
+            return None
+
+        normalized = timestamp
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _load(self) -> None:
         """Load orders from disk."""
@@ -176,26 +269,46 @@ class OrderStateManager:
             logger.error(f"Error loading orders_state.json: {e}", exc_info=True)
             self._orders = {"orders": {}, "metadata": {"last_updated": None}}
 
-    def _save(self) -> None:
-        """Save orders to disk with atomic write."""
-        try:
-            # Update metadata
-            self._orders["metadata"]["last_updated"] = datetime.now(
-                timezone.utc
-            ).isoformat()
+    async def _save(self) -> None:
+        """Save orders to disk with atomic write in a background thread."""
+        async with self._lock:
+            snapshot = self._snapshot_locked()
 
-            # Atomic write: temp file + rename
-            temp_file = self.orders_file.with_suffix(".tmp")
-            with open(temp_file, "w") as f:
-                json.dump(self._orders, f, indent=2, default=str)
+        await asyncio.to_thread(self._save_sync, snapshot)
+
+    def _snapshot_locked(self) -> Dict[str, Any]:
+        """Build a stable in-memory snapshot while the caller holds the lock."""
+        self._orders.setdefault("orders", {})
+        self._orders.setdefault("metadata", {})
+        self._orders["metadata"]["last_updated"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+        return deepcopy(self._orders)
+
+    def _save_sync(self, snapshot: Dict[str, Any]) -> None:
+        """The actual synchronous file IO for saving orders."""
+        try:
+            self.orders_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Atomic write: unique temp file + rename to avoid concurrent collisions.
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self.orders_file.parent),
+                prefix=f"{self.orders_file.stem}.",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                json.dump(snapshot, f, indent=2, default=str)
+                temp_path = Path(f.name)
 
             # Atomic rename
-            temp_file.replace(self.orders_file)
+            temp_path.replace(self.orders_file)
 
         except Exception as e:
             logger.error(f"Error saving orders_state.json: {e}", exc_info=True)
 
-    def add_order(self, order: OrderRecord) -> None:
+    async def add_order(self, order: OrderRecord) -> None:
         """
         Add or update an order in state.
 
@@ -203,9 +316,12 @@ class OrderStateManager:
             order: OrderRecord to persist
         """
         order_dict = asdict(order)
-        self._orders["orders"][order.local_id] = order_dict
-        self._save()
-        logger.info(
+        async with self._lock:
+            self._orders["orders"][order.local_id] = order_dict
+            snapshot = self._snapshot_locked()
+
+        await asyncio.to_thread(self._save_sync, snapshot)
+        logger.debug(
             f"Order {order.local_id} added to state (exchange_id={order.exchange_order_id})"
         )
 
@@ -225,16 +341,47 @@ class OrderStateManager:
 
         return OrderRecord(**order_dict)
 
+    def get_order_by_exchange_id(self, exchange_id: str) -> Optional[OrderRecord]:
+        """
+        Retrieve an order by exchange ID.
+
+        Args:
+            exchange_id: Exchange order ID
+
+        Returns:
+            OrderRecord if found, None otherwise
+        """
+        for order_dict in self._orders["orders"].values():
+            if order_dict.get("exchange_order_id") == exchange_id:
+                return OrderRecord(**order_dict)
+        return None
+
     def get_all_orders(self) -> List[OrderRecord]:
         """Get all orders in state."""
         return [OrderRecord(**o) for o in self._orders["orders"].values()]
+
+    def get_orders_by_symbol(self, symbol: str) -> List[OrderRecord]:
+        """Get all orders for a specific symbol."""
+        return [
+            OrderRecord(**o)
+            for o in self._orders["orders"].values()
+            if o.get("symbol") == symbol
+        ]
 
     def get_open_orders(self) -> List[OrderRecord]:
         """Get all orders with open status (NEW, PARTIALLY_FILLED)."""
         return [
             OrderRecord(**o)
             for o in self._orders["orders"].values()
-            if o.get("status") in ["NEW", "PARTIALLY_FILLED"]
+            if str(o.get("status", "")).upper() in ["NEW", "PARTIALLY_FILLED", "OPEN"]
+        ]
+
+    def get_open_orders_by_symbol(self, symbol: str) -> List[OrderRecord]:
+        """Get all open orders for a specific symbol."""
+        return [
+            OrderRecord(**o)
+            for o in self._orders["orders"].values()
+            if o.get("symbol") == symbol and str(o.get("status", "")).upper() in ["NEW", "PARTIALLY_FILLED", "OPEN"]
         ]
 
     def get_unverified_orders(self) -> List[OrderRecord]:
@@ -245,7 +392,7 @@ class OrderStateManager:
             if o.get("verification_status") == "UNVERIFIED"
         ]
 
-    def update_order_status(
+    async def update_order_status(
         self,
         local_id: str,
         status: str,
@@ -261,20 +408,23 @@ class OrderStateManager:
             filled_qty: Filled quantity (if applicable)
             avg_price: Average fill price (if applicable)
         """
-        if local_id not in self._orders["orders"]:
-            logger.warning(f"Cannot update non-existent order {local_id}")
-            return
+        async with self._lock:
+            if local_id not in self._orders["orders"]:
+                logger.warning(f"Cannot update non-existent order {local_id}")
+                return
 
-        self._orders["orders"][local_id]["status"] = status
-        if filled_qty is not None:
-            self._orders["orders"][local_id]["filled_qty"] = filled_qty
-        if avg_price is not None:
-            self._orders["orders"][local_id]["avg_price"] = avg_price
+            self._orders["orders"][local_id]["status"] = status
+            if filled_qty is not None:
+                self._orders["orders"][local_id]["filled_qty"] = filled_qty
+            if avg_price is not None:
+                self._orders["orders"][local_id]["avg_price"] = avg_price
 
-        self._save()
+            snapshot = self._snapshot_locked()
+
+        await asyncio.to_thread(self._save_sync, snapshot)
         logger.info(f"Order {local_id} status updated to {status}")
 
-    def mark_as_stale(
+    async def mark_as_stale(
         self, local_id: str, reason: str = "Not found on exchange"
     ) -> None:
         """
@@ -284,13 +434,16 @@ class OrderStateManager:
             local_id: Local order ID
             reason: Reason for marking stale
         """
-        if local_id not in self._orders["orders"]:
-            logger.warning(f"Cannot mark non-existent order {local_id} as stale")
-            return
+        async with self._lock:
+            if local_id not in self._orders["orders"]:
+                logger.warning(f"Cannot mark non-existent order {local_id} as stale")
+                return
 
-        self._orders["orders"][local_id]["status"] = "STALE"
-        self._orders["orders"][local_id]["verification_error"] = reason
-        self._save()
+            self._orders["orders"][local_id]["status"] = "STALE"
+            self._orders["orders"][local_id]["verification_error"] = reason
+            snapshot = self._snapshot_locked()
+
+        await asyncio.to_thread(self._save_sync, snapshot)
         logger.warning(f"Order {local_id} marked as STALE: {reason}")
 
     async def reconcile_orders(self, exchange_fetch_func) -> Dict[str, Any]:
@@ -359,7 +512,7 @@ class OrderStateManager:
                             "status": local_order.status,
                         }
                     )
-                    self.mark_as_stale(
+                    await self.mark_as_stale(
                         local_order.local_id,
                         "Order not found on exchange during reconciliation",
                     )
@@ -379,7 +532,7 @@ class OrderStateManager:
                             }
                         )
                         # Update local status
-                        self.update_order_status(
+                        await self.update_order_status(
                             local_order.local_id,
                             exchange_status,
                             str(exchange_order.get("filled", 0)),
@@ -421,6 +574,101 @@ class OrderStateManager:
             report["error"] = str(e)
 
         return report
+
+    async def prune_archive(self) -> None:
+        """
+        Move terminal orders older than retention window into 'orders_archive.json'.
+
+        Terminal statuses are controlled by BOTV2_ORDER_STATE_PRUNE_STATUSES.
+        Retention age is controlled by BOTV2_ORDER_STATE_RETENTION_HOURS.
+        """
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            to_archive = {}
+            to_keep = {}
+
+            orders_dict = self._orders.get("orders", {})
+            for local_id, order in orders_dict.items():
+                status = order.get("status", "").upper()
+                created_at_str = order.get("created_at")
+
+                should_archive = False
+                if status in self._prune_statuses:
+                    created_at = self._parse_iso_datetime(created_at_str)
+                    if created_at is None:
+                        logger.warning(
+                            "Skipping archival for %s due to invalid created_at=%r",
+                            local_id,
+                            created_at_str,
+                        )
+                    elif now - created_at > timedelta(hours=self._retention_hours):
+                        should_archive = True
+
+                if should_archive:
+                    archived_order = deepcopy(order)
+                    if self._archive_strip_raw_response:
+                        archived_order.pop("raw_response", None)
+                    to_archive[local_id] = archived_order
+                else:
+                    to_keep[local_id] = order
+
+            if not to_archive:
+                logger.debug("No orders to prune from state")
+                return
+
+            logger.info(
+                "Pruning %s orders to archive (retention_hours=%s, statuses=%s)",
+                len(to_archive),
+                self._retention_hours,
+                sorted(self._prune_statuses),
+            )
+
+            # Update in-memory state
+            self._orders["orders"] = to_keep
+            snapshot = self._snapshot_locked()
+
+        await asyncio.to_thread(self._save_sync, snapshot)
+
+        archive_file = self.data_dir / "orders_archive.json"
+        await asyncio.to_thread(self._append_to_archive, archive_file, to_archive)
+
+    def _append_to_archive(self, archive_file: Path, new_orders: Dict[str, Any]) -> None:
+        """Helper to append orders to archive file synchronously."""
+        try:
+            archive_data = {"orders": {}, "metadata": {"last_archived": None}}
+            
+            if archive_file.exists():
+                try:
+                    with open(archive_file, "r") as f:
+                        archive_data = json.load(f)
+                except Exception:
+                    logger.warning("Failed to load archive file, starting fresh archive")
+
+            # Add new orders
+            archive_data["orders"].update(new_orders)
+            archive_data["metadata"]["last_archived"] = datetime.now(timezone.utc).isoformat()
+
+            archive_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Atomic write for archive with unique temp file.
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(archive_file.parent),
+                prefix=f"{archive_file.stem}.",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                json.dump(archive_data, f, indent=2, default=str)
+                temp_path = Path(f.name)
+            temp_path.replace(archive_file)
+            
+        except Exception as e:
+            logger.error(f"Error appending to orders_archive.json: {e}", exc_info=True)
+
+    def get_total_trades(self) -> int:
+        """Get total number of closed trades."""
+        return len([o for o in self._orders["orders"].values() if o.get("status") == "CLOSED"])
 
     def get_stats(self) -> Dict[str, Any]:
         """Get order statistics."""

@@ -41,6 +41,7 @@ from bot_v2.position.tracker import PositionTracker
 from bot_v2.position.trailing_stop import TrailingStopCalculator
 from bot_v2.risk.adaptive_integration import AdaptiveRiskIntegration
 from bot_v2.risk.capital_manager import CapitalManager
+from bot_v2.risk.global_risk_manager import GlobalRiskManager
 from bot_v2.utils.latency_tracker import LatencyTracker
 from bot_v2.utils.logging_config import setup_logging
 from bot_v2.utils.performance_profiler import profile_signal_processing
@@ -240,9 +241,15 @@ class TradingBot:
         self.risk_manager = AdaptiveRiskIntegration(
             data_dir=self.data_dir, capital_manager=self.capital_manager
         )
+        self.global_risk_manager = GlobalRiskManager(
+            capital_manager=self.capital_manager,
+            max_drawdown_pct=0.20,  # 20% portfolio drawdown halt
+        )
         self.volatility_filter = VolatilityFilter()  # Entry filter
         self.cost_filter = CostFilter()  # Entry filter
         self.trade_history: List[Dict[str, Any]] = []  # Trade history for analytics
+        self.grid_trade_history: List[Dict[str, Any]] = []  # Closed grid trades
+        self._grid_history_lock = asyncio.Lock()
         self.grid_orchestrators: Dict[str, Any] = {}  # Active grid sessions by symbol
         self.grid_states: Dict[str, Any] = {}  # Persistent grid states
 
@@ -286,9 +293,18 @@ class TradingBot:
             self.market_data_cache = None
             logger.info("Market data cache disabled")
 
+        # Initialize order state manager for ALL tracking (Phase 5: Unified State)
+        from bot_v2.execution.order_state_manager import OrderStateManager
+
+        self.order_state_manager = OrderStateManager(data_dir=self.data_dir)
+
         # Initialize simulated exchange (always available)
         fee = Decimal("0.0004")  # 0.04% default fee
-        self.sim_exchange = SimulatedExchange(fee=fee, cache=self.market_data_cache)
+        self.sim_exchange = SimulatedExchange(
+            fee=fee,
+            cache=self.market_data_cache,
+            order_state_manager=self.order_state_manager,
+        )
         logger.info(f"🔧 Simulated exchange initialized for {len(sim_symbols)} symbols")
 
         # Initialize live exchange if needed
@@ -313,6 +329,7 @@ class TradingBot:
                 key=api_key,
                 secret=api_secret,
                 cache=self.market_data_cache,
+                order_state_manager=self.order_state_manager,
             )
             logger.info(
                 f"🚀 Live exchange initialized for {len(live_symbols)} symbols: {', '.join(live_symbols)}"
@@ -322,9 +339,6 @@ class TradingBot:
 
         # Initialize order managers for both exchanges
         # We'll route to the correct one based on symbol mode
-        from bot_v2.execution.order_state_manager import OrderStateManager
-
-        self.order_state_manager = OrderStateManager(data_dir=self.data_dir)
         self.sim_order_manager = OrderManager(
             self.sim_exchange, order_state_manager=self.order_state_manager
         )
@@ -347,6 +361,10 @@ class TradingBot:
         self.last_heartbeat_time = 0.0
         self.last_summary_sent = datetime.now(timezone.utc) - timedelta(days=1)
         self.last_reconciliation_time = 0.0  # Phase 2: Periodic reconciliation
+        self.last_prune_time = 0.0  # Phase 5: State pruning
+        self.order_state_prune_interval_sec = int(
+            os.getenv("BOTV2_ORDER_STATE_PRUNE_INTERVAL_SECS", "21600")
+        )
 
         # In-memory caches (performance)
         # ATR cache keyed by (symbol, timeframe) -> {"last_bar_ts": int, "atr": Decimal}
@@ -598,21 +616,27 @@ class TradingBot:
                 _,  # Capitals loaded by CapitalManager
                 self.trade_history,
                 self.grid_states,
+                self.grid_trade_history,
             ) = self.state_manager.load_states()
-            
+
             logger.info(
                 f"Successfully restored state: {len(self.positions)} positions, "
-                f"{len(self.grid_states)} grid sessions."
+                f"{len(self.grid_states)} grid sessions, "
+                f"{len(self.grid_trade_history)} grid closed trades."
             )
         except Exception as e:
-            logger.error(f"Failed to load state during initialization: {e}", exc_info=True)
+            logger.error(
+                f"Failed to load state during initialization: {e}", exc_info=True
+            )
             # Fallback to standard loading if multi-load fails
             self.positions = self.state_manager.load_positions()
             self.trade_history = self.state_manager.load_trade_history()
             self.grid_states = {}
+            self.grid_trade_history = self.state_manager.load_grid_trade_history()
 
         # Initialize Grid Orchestrators for all symbols
         from bot_v2.grid.orchestrator import GridOrchestrator
+
         for symbol, config in self.strategy_configs.items():
             if config.grid_enabled:
                 order_manager = self._get_order_manager_for_symbol(symbol)
@@ -622,33 +646,39 @@ class TradingBot:
                     config=config,
                     order_manager=order_manager,
                     exchange=exchange,
-                    risk_manager=self.risk_manager
+                    risk_manager=self.risk_manager,
+                    on_grid_trade_closed=self._on_grid_trade_closed,
+                    on_grid_fill=self._on_grid_fill,
                 )
-                
-                # Restore state if available
+
+                # Restore high-level state if available
                 if symbol in self.grid_states:
                     state = self.grid_states[symbol]
-                    orchestrator.is_active = state.is_active
+                    # Note: active_orders recovery now handled via OrderStateManager inside start()
                     orchestrator.centre_price = state.centre_price
-                    orchestrator.grid_order_ids = set(state.active_orders.keys())
-                    orchestrator.order_metadata = dict(state.active_orders)
-                    orchestrator.session_fill_count = int(state.grid_fills) + int(state.counter_fills)
-                    logger.info(f"[{symbol}] Grid Orchestrator restored from state (Active: {orchestrator.is_active}).")
+                    orchestrator.session_fill_count = int(state.grid_fills) + int(
+                        state.counter_fills
+                    )
 
-                    # Self-heal stale sessions: restored active with no tracked orders cannot fill anything.
-                    if orchestrator.is_active and not orchestrator.grid_order_ids:
+                    if state.is_active:
                         logger.info(
-                            f"[{symbol}] Restored session has no active grid orders; forcing grid redeploy."
+                            f"[{symbol}] Grid session was active in previous state. Resuming..."
                         )
-                        orchestrator.is_active = False
-                
+                        # We don't set is_active=True here yet, let start() handle it and recover orders
+
                 self.grid_orchestrators[symbol] = orchestrator
-                
-                # AUTO-START: If enabled in config and not already running from state, start it now
-                if config.grid_enabled and not orchestrator.is_active:
-                    logger.info(f"[{symbol}] Auto-starting grid session as per config.")
-                    await orchestrator.start()  # Block until deployment completes
-                
+
+                # AUTO-START: Start if was active OR if grid_enabled is set to true
+                is_previously_active = (
+                    self.grid_states.get(symbol).is_active
+                    if symbol in self.grid_states
+                    else False
+                )
+
+                if config.grid_enabled or is_previously_active:
+                    logger.info(f"[{symbol}] Starting grid orchestrator...")
+                    await orchestrator.start()
+
                 logger.info(f"[{symbol}] Grid Orchestrator ready.")
 
         # Initialize exchange connection (load markets)
@@ -755,7 +785,8 @@ class TradingBot:
         live_positions = {
             sym: pos
             for sym, pos in self.positions.items()
-            if sym in self.strategy_configs and self.strategy_configs[sym].mode == "live"
+            if sym in self.strategy_configs
+            and self.strategy_configs[sym].mode == "live"
         }
 
         if not live_positions:
@@ -792,7 +823,9 @@ class TradingBot:
                         f"[{symbol}] RECONCILE: Amount mismatch! Persisted: {persisted_amount}, Exchange: {exchange_amount}. Using exchange value."
                     )
                     # Update position amount to match exchange
-                    self.positions[symbol] = position.copy(current_amount=exchange_amount)
+                    self.positions[symbol] = position.copy(
+                        current_amount=exchange_amount
+                    )
                 else:
                     logger.info(f"[{symbol}] RECONCILE: OK")
             except Exception as e:
@@ -894,6 +927,20 @@ class TradingBot:
 
         try:
             while self.is_running:
+                # 0. Evaluate Portfolio-wide Risk (Phase 5: Global Safety)
+                if not await self.global_risk_manager.evaluate_portfolio_risk():
+                    logger.critical(
+                        f"🛑 HALTING BOT: {self.global_risk_manager.halt_reason}"
+                    )
+                    # Stop all grid orchestrators
+                    for orch in self.grid_orchestrators.values():
+                        if orch.is_active:
+                            await orch.stop(
+                                reason=f"Portfolio Halt: {self.global_risk_manager.halt_reason}"
+                            )
+                    self.is_running = False
+                    break
+
                 # Process pending signals
                 await self._process_signals()
 
@@ -914,6 +961,13 @@ class TradingBot:
 
                 # Persist state
                 await self._persist_state()
+
+                # Periodic Maintenance (Pruning every 6 hours)
+                if current_time - self.last_prune_time > self.order_state_prune_interval_sec:
+                    logger.info("Running periodic order state pruning...")
+                    # Run in background to avoid blocking heartbeat
+                    asyncio.create_task(self.order_state_manager.prune_archive())
+                    self.last_prune_time = current_time
 
                 # Sleep to avoid busy loop (adaptive when idle)
                 idle_sleep = float(os.getenv("BOTV2_IDLE_SLEEP_SECS", "1.0"))
@@ -1280,15 +1334,13 @@ class TradingBot:
             tracker.checkpoint("after_risk_calc")
 
         if not adaptive_params["allowed"]:
-            reason = adaptive_params.get('reason', 'Unknown')
-            if adaptive_params.get('kill_switch_active'):
+            reason = adaptive_params.get("reason", "Unknown")
+            if adaptive_params.get("kill_switch_active"):
                 logger.error(
                     f"[{symbol}] KILL SWITCH ACTIVE - trading halted: {reason}"
                 )
             else:
-                logger.warning(
-                    f"[{symbol}] Adaptive risk BLOCKED trade: {reason}"
-                )
+                logger.warning(f"[{symbol}] Adaptive risk BLOCKED trade: {reason}")
             await self._send_status_to_generator(symbol, "REJECTED")
             return
 
@@ -1376,9 +1428,7 @@ class TradingBot:
         if preview_amount <= Decimal("0"):
             step_size = self._get_exchange_step_size(exchange, symbol)
             min_required_notional = (
-                step_size * price
-                if step_size is not None
-                else Decimal("0")
+                step_size * price if step_size is not None else Decimal("0")
             )
             min_required_notional_str = (
                 f"{min_required_notional:.2f}"
@@ -2562,61 +2612,143 @@ class TradingBot:
         # Persist core runtime state first.
         self.state_manager.save_positions(self.positions)
         self.state_manager.save_history(self.trade_history)
+        # Guard against concurrent mutation from fill callbacks while serializing.
+        async with self._grid_history_lock:
+            history_snapshot = self.grid_trade_history.copy()
+        await asyncio.to_thread(
+            self.state_manager.save_grid_trade_history,
+            history_snapshot,
+        )
 
         # 2. Persist Grid States
         grid_states_to_save = {}
         from bot_v2.models.grid_state import GridState
-        for symbol, orchestrator in self.grid_orchestrators.items():
-            if orchestrator.is_active:
-                active_orders = {}
-                for order_id in orchestrator.grid_order_ids:
-                    active_orders[str(order_id)] = orchestrator.order_metadata.get(str(order_id), {})
 
-                grid_states_to_save[symbol] = GridState(
-                    symbol_id=symbol,
-                    is_active=orchestrator.is_active,
-                    centre_price=orchestrator.centre_price,
-                    active_orders=active_orders,
-                    grid_fills=int(orchestrator.session_fill_count),
-                    last_tick_time=datetime.now(timezone.utc)
+        for symbol, orchestrator in self.grid_orchestrators.items():
+            active_orders = {}
+            for order_id in orchestrator.grid_order_ids:
+                active_orders[str(order_id)] = orchestrator.order_metadata.get(
+                    str(order_id), {}
                 )
-        
+
+            grid_states_to_save[symbol] = GridState(
+                symbol_id=symbol,
+                is_active=orchestrator.is_active,
+                centre_price=orchestrator.centre_price,
+                active_orders=active_orders,
+                grid_fills=int(orchestrator.session_fill_count),
+                last_tick_time=datetime.now(timezone.utc),
+            )
+
         if grid_states_to_save or self.grid_states:
             self.state_manager.save_grid_states(grid_states_to_save)
-            self.grid_states = grid_states_to_save
+            # BUG FIX: Update self.grid_states incrementally instead of overwriting
+            # This preserves inactive grids that may become active again
+            for symbol, state in grid_states_to_save.items():
+                self.grid_states[symbol] = state
             logger.debug(f"Persisted {len(grid_states_to_save)} grid sessions.")
+
+        # Persist runtime exposure snapshot so grid activity remains visible even
+        # when directional trade_history.json has no entries.
+        exposure_snapshot: Dict[str, Any] = {}
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for symbol, orchestrator in self.grid_orchestrators.items():
+            centre_price = getattr(orchestrator, "centre_price", None)
+            exposure_snapshot[symbol] = {
+                "timestamp": now_iso,
+                "is_active": bool(getattr(orchestrator, "is_active", False)),
+                "centre_price": str(centre_price) if centre_price is not None else None,
+                "open_order_count": int(len(getattr(orchestrator, "grid_order_ids", set()))),
+                "session_fill_count": int(getattr(orchestrator, "session_fill_count", 0)),
+                "session_buy_qty": str(getattr(orchestrator, "session_buy_qty", Decimal("0"))),
+                "session_sell_qty": str(getattr(orchestrator, "session_sell_qty", Decimal("0"))),
+                "session_realized_pnl_quote": str(
+                    getattr(orchestrator, "session_realized_pnl_quote", Decimal("0"))
+                ),
+            }
+        self.state_manager.save_grid_exposure_snapshot(exposure_snapshot)
+
+    async def _on_grid_trade_closed(self, trade: Dict[str, Any]) -> None:
+        """Persist a closed grid trade and update symbol-level capital/performance."""
+        symbol = trade.get("symbol")
+        pnl = Decimal(str(trade.get("pnl_usd", "0")))
+
+        async with self._grid_history_lock:
+            self.grid_trade_history.append(trade)
+            history_snapshot = self.grid_trade_history.copy()
+        await asyncio.to_thread(
+            self.state_manager.save_grid_trade_history,
+            history_snapshot,
+        )
+        await self.capital_manager.update_capital(symbol, pnl)
+        self._update_performance_metrics(symbol)
+
+        logger.info(
+            f"[{symbol}] Grid trade closed: pnl={pnl:+.4f}, "
+            f"grid_history_count={len(self.grid_trade_history)}"
+        )
+
+    async def _on_grid_fill(self, fill_event: Dict[str, Any]) -> None:
+        """Persist grid fill events to append-only JSONL log."""
+        await asyncio.to_thread(
+            self.state_manager.append_fill_log_event,
+            fill_event,
+        )
 
     async def _run_grid_orchestrators_tick(self) -> None:
         """Run one tick for all active grid orchestrators with concurrent data fetches."""
         tick_start = time.perf_counter()
+
+        # DEBUG: Log is_active status for all orchestrators
+        for symbol, orch in self.grid_orchestrators.items():
+            is_active_value = getattr(orch, "is_active", "ATTR_MISSING")
+            logger.debug(f"[DEBUG][GRID_TICK] {symbol} is_active={is_active_value}")
+
         active = [
             (symbol, orchestrator)
             for symbol, orchestrator in self.grid_orchestrators.items()
             if getattr(orchestrator, "is_active", False)
         ]
+
+        logger.debug(
+            f"[DEBUG][GRID_TICK] Active orchestrators: {[s for s, _ in active]}"
+        )
+
         if not active:
             return
 
-        fetch_tasks = []
+        # NOTE: Use sequential fetches here.
+        # Concurrent fetches against a shared exchange instance can saturate its
+        # internal throttle queue and cause repeated per-tick timeouts.
+        fetch_results = []
+        fetch_timeout_secs = float(os.getenv("GRID_OHLCV_FETCH_TIMEOUT_SECS", "20"))
         for symbol, _ in active:
             config = self.strategy_configs[symbol]
             exchange = self._get_exchange_for_symbol(symbol)
-            fetch_tasks.append(
-                asyncio.wait_for(exchange.fetch_ohlcv(symbol, config.timeframe, 100), timeout=10.0)
-            )
-
-        fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            try:
+                ohlcv = await asyncio.wait_for(
+                    exchange.fetch_ohlcv(symbol, config.timeframe, 100),
+                    timeout=fetch_timeout_secs,
+                )
+            except Exception as exc:
+                ohlcv = exc
+            fetch_results.append(ohlcv)
         fetch_ms = (time.perf_counter() - tick_start) * 1000.0
 
         tick_tasks = []
         for idx, (symbol, orchestrator) in enumerate(active):
             ohlcv = fetch_results[idx]
             if isinstance(ohlcv, Exception):
-                logger.warning(f"[{symbol}] OHLCV fetch failed for grid tick: {ohlcv}")
+                logger.warning(
+                    f"[{symbol}] OHLCV fetch failed for grid tick: "
+                    f"{type(ohlcv).__name__}: {ohlcv}"
+                )
                 continue
             if ohlcv is None:
                 continue
-            tick_tasks.append(self._process_grid_orchestrator_tick(symbol, orchestrator, ohlcv))
+            tick_tasks.append(
+                self._process_grid_orchestrator_tick(symbol, orchestrator, ohlcv)
+            )
 
         if tick_tasks:
             await asyncio.gather(*tick_tasks, return_exceptions=True)
@@ -2644,30 +2776,34 @@ class TradingBot:
         try:
             exchange = self._get_exchange_for_symbol(symbol)
             current_price = Decimal(str(ohlcv.iloc[-1]["close"]))
+            candle_high = Decimal(str(ohlcv.iloc[-1]["high"]))
+            candle_low = Decimal(str(ohlcv.iloc[-1]["low"]))
 
             # 1. Check for simulated fills before ticking logic.
             if hasattr(exchange, "check_fills"):
-                filled_ids = await exchange.check_fills(symbol, current_price)
+                open_orders_by_exchange_id = {
+                    rec.exchange_order_id: rec
+                    for rec in self.order_state_manager.get_open_orders()
+                    if rec.exchange_order_id
+                }
+                filled_ids = await exchange.check_fills(
+                    symbol,
+                    current_price,
+                    candle_high=candle_high,
+                    candle_low=candle_low,
+                )
                 for oid in filled_ids:
-                    order_record = None
-                    for rec in self.order_state_manager.get_open_orders():
-                        if rec.exchange_order_id == oid:
-                            order_record = rec
-                            break
+                    order_record = open_orders_by_exchange_id.get(oid)
 
                     if order_record:
                         fill_avg_price = order_record.avg_price or str(current_price)
-                        self.order_state_manager.update_order_status(
-                            order_record.local_id,
-                            "FILLED",
-                            order_record.quantity,
-                            fill_avg_price,
-                        )
 
                         from bot_v2.models.enums import TradeSide as _TradeSide
 
                         side_enum = (
-                            _TradeSide.BUY if order_record.side == "BUY" else _TradeSide.SELL
+                            _TradeSide.BUY
+                            if order_record.side == "BUY"
+                            else _TradeSide.SELL
                         )
 
                         await orchestrator.handle_fill(
@@ -2675,6 +2811,13 @@ class TradingBot:
                             Decimal(str(fill_avg_price)),
                             Decimal(str(order_record.quantity)),
                             side_enum,
+                        )
+
+                        await self.order_state_manager.update_order_status(
+                            order_record.local_id,
+                            "FILLED",
+                            order_record.quantity,
+                            fill_avg_price,
                         )
 
             # 2. Tick orchestrator logic (Regime/Drift).
@@ -2689,7 +2832,9 @@ class TradingBot:
                     current_price,
                 )
         except Exception as e:
-            logger.error(f"[{symbol}] Error in grid orchestrator tick: {e}", exc_info=True)
+            logger.error(
+                f"[{symbol}] Error in grid orchestrator tick: {e}", exc_info=True
+            )
 
     def _get_active_positions_dict(self) -> Dict[str, Any]:
         """Get active positions formatted for risk manager."""
@@ -3474,8 +3619,9 @@ class TradingBot:
         try:
             from bot_v2.risk.adaptive_risk_manager import PerformanceAnalyzer
 
-            # Calculate updated metrics using trade history
-            metrics = PerformanceAnalyzer.calculate_metrics(symbol, self.trade_history)
+            # Combine directional and grid histories for symbol-level performance tracking.
+            combined_history = [*self.trade_history, *self.grid_trade_history]
+            metrics = PerformanceAnalyzer.calculate_metrics(symbol, combined_history)
 
             # Update cache and save (access the wrapped risk_manager)
             self.risk_manager.risk_manager.performance_cache[symbol] = metrics
@@ -3636,20 +3782,24 @@ class TradingBot:
                 )
 
                 # Send tier transition notification
-                last_notified = await self.capital_manager.get_last_notified_tier(symbol)
+                last_notified = await self.capital_manager.get_last_notified_tier(
+                    symbol
+                )
                 if tier.name != last_notified:
                     tier_info = {
                         "tier": tier.name,
                         "metrics": {
                             "total_trades": metrics.total_trades,
                             "profit_factor": metrics.profit_factor,
-                            "sharpe_ratio": getattr(metrics, 'sharpe_ratio', 0),
+                            "sharpe_ratio": getattr(metrics, "sharpe_ratio", 0),
                             "win_rate": metrics.win_rate,
                         },
                         "capital_allocation": tier.capital_allocation,
                         "max_leverage": tier.max_leverage,
                     }
-                    await self._send_tier_notification(symbol, old_tier_name, tier.name, tier_info)
+                    await self._send_tier_notification(
+                        symbol, old_tier_name, tier.name, tier_info
+                    )
                     await self.capital_manager.set_last_notified_tier(symbol, tier.name)
             else:
                 # Same tier: increment counters
@@ -3952,11 +4102,13 @@ class TradingBot:
             # Optional: Check R-multiple if configured (use value already calculated in history_entry)
             min_r_multiple = feature_cfg.get("require_min_pnl_r_multiple", 0)
             if min_r_multiple > 0:
-                realized_r_multiple = history_entry.get("realized_r_multiple", Decimal("0"))
+                realized_r_multiple = history_entry.get(
+                    "realized_r_multiple", Decimal("0")
+                )
                 # Convert to float for comparison if it's a Decimal
                 if isinstance(realized_r_multiple, Decimal):
                     realized_r_multiple = float(realized_r_multiple)
-                
+
                 if realized_r_multiple < min_r_multiple:
                     logger.info(
                         f"[{position.symbol_id}] leverage_override_rejected_low_r day_key={day_key} "
@@ -3968,10 +4120,10 @@ class TradingBot:
             scope_key_base = (
                 "GLOBAL" if scope == "global" else position.symbol_id.replace("/", "")
             )
-            
+
             override_count = self._count_daily_overrides(scope_key_base, day_key)
             max_overrides = feature_cfg.get("max_daily_overrides_per_symbol", 3)
-            
+
             if override_count >= max_overrides:
                 logger.info(
                     f"[{position.symbol_id}] leverage_override_rejected_limit_reached day_key={day_key} scope={scope_key_base} count={override_count} max={max_overrides}"
@@ -4006,16 +4158,18 @@ class TradingBot:
     def _count_daily_overrides(self, scope_key_prefix: str, day_key: str) -> int:
         """
         Count the number of daily overrides for a scope (symbol) today.
-        
+
         Args:
             scope_key_prefix: Base symbol (e.g., 'XRPUSDT') without sequence suffix
             day_key: Date key (e.g., '20260307_UTC')
-            
+
         Returns:
             Count of non-expired overrides for the symbol today
         """
         try:
             return self.state_manager.count_daily_overrides(day_key, scope_key_prefix)
         except Exception as e:
-            logger.warning(f"Error counting daily overrides for {scope_key_prefix}: {e}")
+            logger.warning(
+                f"Error counting daily overrides for {scope_key_prefix}: {e}"
+            )
             return 0

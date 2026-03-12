@@ -17,6 +17,7 @@ import pytest
 from bot_v2.execution.exchange_interface import ExchangeInterface
 from bot_v2.execution.live_exchange import LiveExchange
 from bot_v2.execution.order_manager import OrderManager
+from bot_v2.execution.order_state_manager import OrderRecord, OrderStateManager
 from bot_v2.execution.simulated_exchange import SimulatedExchange
 from bot_v2.models.enums import TradeSide
 from bot_v2.models.exceptions import OrderExecutionError
@@ -337,6 +338,10 @@ class TestOrderManager:
         exchange.create_market_order = AsyncMock(
             return_value={
                 "id": "order-123",
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 0.1,
+                "type": "market",
                 "status": "closed",
                 "filled": 0.1,
                 "average": 50000,
@@ -345,9 +350,12 @@ class TestOrderManager:
         return exchange
 
     @pytest.fixture
-    def order_manager(self, mock_exchange):
+    def order_manager(self, mock_exchange, tmp_path):
         """Create OrderManager with mock exchange."""
-        return OrderManager(mock_exchange)
+        return OrderManager(
+            mock_exchange,
+            order_state_manager=OrderStateManager(tmp_path),
+        )
 
     @pytest.mark.asyncio
     async def test_create_market_order_success(self, order_manager, mock_exchange):
@@ -364,16 +372,20 @@ class TestOrderManager:
     async def test_create_market_order_tracks_pending(
         self, order_manager, mock_exchange
     ):
-        """OrderManager tracks pending orders."""
-        await order_manager.create_market_order(
+        """OrderManager persists filled market orders without exposing them as pending."""
+        order = await order_manager.create_market_order(
             "BTC/USDT", TradeSide.BUY, Decimal("0.1")
         )
 
+        assert order["id"] == "order-123"
         pending = order_manager.get_pending_orders()
-        assert "order-123" in pending
-        assert pending["order-123"]["symbol_id"] == "BTC/USDT"
-        assert pending["order-123"]["side"] == TradeSide.BUY
-        assert pending["order-123"]["amount"] == Decimal("0.1")
+        assert "order-123" not in pending
+
+        persisted = order_manager.order_state_manager.get_order_by_exchange_id("order-123")
+        assert persisted is not None
+        assert persisted.symbol == "BTC/USDT"
+        assert persisted.side == "BUY"
+        assert Decimal(persisted.quantity) == Decimal("0.1")
 
     @pytest.mark.asyncio
     async def test_create_market_order_invalid_amount(self, order_manager):
@@ -409,7 +421,7 @@ class TestOrderManager:
             "Insufficient balance"
         )
 
-        with pytest.raises(OrderExecutionError, match="Failed to create order"):
+        with pytest.raises(OrderExecutionError, match="Failed to create market order"):
             await order_manager.create_market_order(
                 "BTC/USDT", TradeSide.BUY, Decimal("0.1")
             )
@@ -431,12 +443,21 @@ class TestOrderManager:
     @pytest.mark.asyncio
     async def test_clear_order_tracking(self, order_manager, mock_exchange):
         """OrderManager clears order tracking."""
-        await order_manager.create_market_order(
-            "BTC/USDT", TradeSide.BUY, Decimal("0.1")
+        await order_manager.order_state_manager.add_order(
+            OrderRecord(
+                local_id="local-order-123",
+                exchange_order_id="order-123",
+                symbol="BTC/USDT",
+                side="BUY",
+                quantity="0.1",
+                avg_price="50000",
+                status="NEW",
+                mode="local_sim",
+            )
         )
 
         assert "order-123" in order_manager.get_pending_orders()
-        order_manager.clear_order_tracking("order-123")
+        await order_manager.clear_order_tracking("order-123")
         assert "order-123" not in order_manager.get_pending_orders()
 
     @pytest.mark.asyncio

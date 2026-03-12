@@ -8,6 +8,7 @@ TRENDING, the main loop cancels all open orders and pauses.
 """
 
 import logging
+from decimal import Decimal
 
 import pandas as pd
 from ta.trend import ADXIndicator
@@ -75,23 +76,23 @@ class RegimeDetector:
             )
             return RegimeInfo(
                 regime=MarketRegime.UNKNOWN,
-                adx=0.0,
-                bb_width=0.0,
+                adx=Decimal("0"),
+                bb_width=Decimal("0"),
                 adx_threshold=self.adx_threshold,
-                bb_width_threshold=self.bb_width_threshold,
+                bb_width_threshold=Decimal(str(self.bb_width_threshold)),
                 reason="Insufficient candle data",
             )
 
         # ADX(14)
-        adx_val = float(
-            ADXIndicator(
+        adx_val = Decimal(
+            str(ADXIndicator(
                 high=ohlcv_df["high"],
                 low=ohlcv_df["low"],
                 close=ohlcv_df["close"],
                 window=self.adx_period,
             )
             .adx()
-            .iloc[-1]
+            .iloc[-1])
         )
 
         # Bollinger Band width = (upper - lower) / middle
@@ -100,29 +101,29 @@ class RegimeDetector:
             window=self.bb_period,
             window_dev=self.bb_std,
         )
-        mid = float(bb.bollinger_mavg().iloc[-1])
+        mid = Decimal(str(bb.bollinger_mavg().iloc[-1]))
         if mid > 0:
             bb_width = (
-                float(bb.bollinger_hband().iloc[-1])
-                - float(bb.bollinger_lband().iloc[-1])
+                Decimal(str(bb.bollinger_hband().iloc[-1]))
+                - Decimal(str(bb.bollinger_lband().iloc[-1]))
             ) / mid
         else:
-            bb_width = 0.0
+            bb_width = Decimal("0")
 
         ranging = (
-            adx_val < self.adx_threshold
-            and bb_width < self.bb_width_threshold
+            adx_val < Decimal(str(self.adx_threshold))
+            and bb_width < Decimal(str(self.bb_width_threshold))
         )
         regime = MarketRegime.RANGING if ranging else MarketRegime.TRENDING
 
         if ranging:
             reason = (
-                f"ADX={adx_val:.2f} < {self.adx_threshold} "
-                f"AND BB_w={bb_width:.4f} < {self.bb_width_threshold}"
+                f"ADX={float(adx_val):.2f} < {self.adx_threshold} "
+                f"AND BB_w={float(bb_width):.4f} < {self.bb_width_threshold}"
             )
         else:
             reason = (
-                f"ADX={adx_val:.2f} or BB_w={bb_width:.4f} exceeds threshold"
+                f"ADX={float(adx_val):.2f} or BB_w={float(bb_width):.4f} exceeds threshold"
             )
 
         logger.debug("Regime: %s | %s", regime.value, reason)
@@ -131,6 +132,6 @@ class RegimeDetector:
             adx=adx_val,
             bb_width=bb_width,
             adx_threshold=self.adx_threshold,
-            bb_width_threshold=self.bb_width_threshold,
+            bb_width_threshold=Decimal(str(self.bb_width_threshold)),
             reason=reason,
         )

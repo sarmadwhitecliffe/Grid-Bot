@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 import ccxt.async_support as ccxt_async
 import pandas as pd
 
+from config.settings import settings
 from bot_v2.execution.exchange_interface import ExchangeInterface
 from bot_v2.execution.market_data_cache import MarketDataCache
 from bot_v2.models.enums import TradeSide
@@ -73,6 +74,7 @@ class LiveExchange(ExchangeInterface):
         key: Optional[str],
         secret: Optional[str],
         cache: Optional[MarketDataCache] = None,
+        order_state_manager: Optional[Any] = None,
     ) -> None:
         """
         Initialize live exchange connection.
@@ -82,14 +84,17 @@ class LiveExchange(ExchangeInterface):
             key: API key for authenticated requests
             secret: API secret for authenticated requests
             cache: Optional shared MarketDataCache instance (Phase 2 optimization)
+            order_state_manager: Unified state manager
 
         Raises:
             AttributeError: If exchange name is not found in CCXT
         """
         try:
+            self.order_state_manager = order_state_manager
             exchange_class = getattr(ccxt_async, name)
+            market_type = settings.MARKET_TYPE.rstrip('s') if settings.MARKET_TYPE.endswith('s') else settings.MARKET_TYPE
             config = {
-                "options": {"defaultType": "future"},
+                "options": {"defaultType": market_type},
                 "apiKey": key,
                 "secret": secret,
                 "enableRateLimit": True,  # Enable automatic rate limiting
@@ -99,7 +104,7 @@ class LiveExchange(ExchangeInterface):
 
             # Initialize public exchange for market data (no keys) to avoid IP restrictions on read-only data
             public_config = {
-                "options": {"defaultType": "future"},
+                "options": {"defaultType": market_type},
                 "enableRateLimit": True,
                 "rateLimit": 50,
             }
