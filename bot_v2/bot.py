@@ -2704,6 +2704,7 @@ class TradingBot:
         )
         await self.capital_manager.update_capital(symbol, pnl)
         self._update_performance_metrics(symbol)
+        await self._check_tier_transition(symbol)
 
         logger.info(
             f"[{symbol}] Grid trade closed: pnl={pnl:+.4f}, "

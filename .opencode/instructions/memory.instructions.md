@@ -49,6 +49,9 @@ Never let a lower layer import from a higher one. Violations break the isolation
 - ADX(14) via `ta.trend.ADXIndicator` — trending signal
 - Bollinger Band Width via `ta.volatility.BollingerBands` — range compression signal
 - Both computed from historical OHLCV fetched via the price feed
+- **Pre-deployment check**: Regime is checked BEFORE grid deployment in `start()` method. If TRENDING, grid deployment is skipped.
+- **Runtime throttling**: Regime is checked every 5 minutes (configurable via `grid_regime_check_interval_seconds`) during active grid to reduce false positives from brief price spikes.
+- **Recovered grids**: First tick always runs regime check, then throttled.
 
 ## OHLCV Caching
 
@@ -116,6 +119,7 @@ Never start a phase until all its dependencies are complete.
 | Price feed | `src/data/price_feed.py` |
 | Regime detector | `src/strategy/regime_detector.py` |
 | Grid calculator | `src/strategy/grid_calculator.py` |
+| Grid orchestrator | `bot_v2/grid/orchestrator.py` |
 | Order manager | `src/oms/order_manager.py` |
 | Fill handler | `src/oms/fill_handler.py` |
 | Risk manager | `src/risk/risk_manager.py` |

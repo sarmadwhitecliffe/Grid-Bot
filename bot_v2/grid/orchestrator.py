@@ -79,6 +79,8 @@ class GridOrchestrator:
         self.last_reinvest_time: Optional[float] = None
         self.session_reinvest_count = 0
         self.last_stop_time: Optional[float] = None
+        self.last_stop_reason: Optional[str] = None
+        self._last_regime_check_time: Optional[float] = None
         # Open inventory lots used to pair fills into closed grid trades.
         self._open_long_lots: List[Dict[str, Any]] = []
         self._open_short_lots: List[Dict[str, Any]] = []
@@ -234,12 +236,78 @@ class GridOrchestrator:
         if not self.grid_order_ids:
             ticker = await self.exchange.get_market_price(self.symbol)
             if ticker:
+                # Pre-deployment regime check: skip grid if market is trending
+                if await self._check_regime_before_deployment():
+                    logger.warning(
+                        f"[{self.symbol}] Skipping grid deployment - market is TRENDING. "
+                        f"Will retry on next tick."
+                    )
+                    return
+
                 logger.info(f"[{self.symbol}] No active orders found. Deploying grid.")
                 await self.deploy_grid(ticker)
         else:
             logger.info(
                 f"[{self.symbol}] Recovered {len(self.grid_order_ids)} active orders from state."
             )
+
+    async def _check_regime_before_deployment(self) -> bool:
+        """
+        Check market regime before grid deployment.
+
+        Returns:
+            True if market is TRENDING (should skip deployment).
+            False if market is RANGING or UNKNOWN (can deploy).
+        """
+        try:
+            import pandas as pd
+            import time as time_module
+
+            # Fetch OHLCV data for regime detection
+            timeframe = getattr(self.config, "timeframe", "15m")
+            ohlcv_data = await self.exchange.fetch_ohlcv(self.symbol, timeframe, 100)
+
+            if ohlcv_data is None:
+                logger.warning(
+                    f"[{self.symbol}] No OHLCV data received for regime check. "
+                    f"Allowing deployment."
+                )
+                return False
+
+            # Handle both list and DataFrame formats (simulated exchange returns DataFrame)
+            if isinstance(ohlcv_data, pd.DataFrame):
+                df = ohlcv_data
+            else:
+                df = pd.DataFrame(
+                    ohlcv_data,
+                    columns=["timestamp", "open", "high", "low", "close", "volume"],
+                )
+
+            if len(df) < 20:
+                logger.warning(
+                    f"[{self.symbol}] Insufficient OHLCV data for regime check "
+                    f"({len(df)} rows). Allowing deployment."
+                )
+                return False
+
+            # Detect regime
+            regime_info = self.regime_detector.detect(df)
+            logger.info(
+                f"[{self.symbol}] Pre-deployment regime check: "
+                f"regime={regime_info.regime.value} "
+                f"ADX={float(regime_info.adx):.2f} BB_w={float(regime_info.bb_width):.4f}"
+            )
+
+            if regime_info.regime == MarketRegime.TRENDING:
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(
+                f"[{self.symbol}] Regime check failed: {e}. Allowing deployment."
+            )
+            return False
 
     async def recover_state(self):
         """Recover active grid orders from the OrderStateManager."""
@@ -285,6 +353,7 @@ class GridOrchestrator:
         self.order_metadata.clear()
         self.is_active = False
         self.last_stop_time = time_module.time()
+        self.last_stop_reason = reason
 
     async def _bank_and_reinvest(self, reason: str = "Session TP"):
         """Bank realized gains, reset session trackers, and deploy a new grid.
@@ -369,21 +438,44 @@ class GridOrchestrator:
         if not getattr(self.config, "grid_auto_restart", True):
             return False
 
-        min_interval = getattr(self.config, "grid_reinvest_min_interval_seconds", 60)
-
         if self.last_stop_time is None:
             return False
 
+        # Check if stopped due to TRENDING - use shorter cooldown, allow retry with 0 fills
+        is_trending_stop = (
+            self.last_stop_reason is not None
+            and "TRENDING" in self.last_stop_reason.upper()
+        )
+
+        if is_trending_stop:
+            # Shorter cooldown for trending stops - retry frequently to catch ranging markets
+            min_interval = getattr(
+                self.config, "grid_trending_retry_interval_seconds", 30
+            )
+        else:
+            min_interval = getattr(
+                self.config, "grid_reinvest_min_interval_seconds", 60
+            )
+
         elapsed = time_module.time() - self.last_stop_time
         if elapsed < min_interval:
-            logger.debug(
-                f"[{self.symbol}] Auto-restart cooldown active ({elapsed:.1f}s < {min_interval}s)."
-            )
+            if is_trending_stop:
+                logger.debug(
+                    f"[{self.symbol}] Trend retry cooldown active ({elapsed:.1f}s < {min_interval}s)."
+                )
             return False
 
+        # Allow retry with 0 fills if stopped due to trending (couldn't deploy)
         if self.session_fill_count == 0:
-            logger.debug(f"[{self.symbol}] No session fills, skipping auto-restart.")
-            return False
+            if is_trending_stop:
+                logger.info(
+                    f"[{self.symbol}] Retrying grid after trending stop (0 fills)."
+                )
+            else:
+                logger.debug(
+                    f"[{self.symbol}] No session fills, skipping auto-restart."
+                )
+                return False
 
         initial_capital = Decimal(
             str(getattr(self.config, "initial_capital", Decimal("1")))
@@ -531,17 +623,36 @@ class GridOrchestrator:
                 await self.stop(reason="Quick-Bank: Max Drawdown Hit")
             return
 
-        # 2. Regime Detection
-        regime = self.regime_detector.detect(ohlcv_df)
-        logger.debug(
-            f"[{self.symbol}] Regime={regime.regime.value} ADX={float(regime.adx):.2f} BB_width={float(regime.bb_width):.4f}"
+        # 2. Regime Detection (throttled to reduce false positives)
+        import time as time_module
+
+        regime_check_interval = getattr(
+            self.config, "grid_regime_check_interval_seconds", 300
+        )  # Default 5 minutes
+
+        current_time = time_module.time()
+        should_check_regime = (
+            self._last_regime_check_time is None
+            or (current_time - self._last_regime_check_time) >= regime_check_interval
         )
-        if regime.regime == MarketRegime.TRENDING:
-            logger.warning(
-                f"[{self.symbol}] Trend detected! Cancelling grid to prevent trend-following risk."
+
+        if should_check_regime:
+            self._last_regime_check_time = current_time
+            regime = self.regime_detector.detect(ohlcv_df)
+            logger.debug(
+                f"[{self.symbol}] Regime={regime.regime.value} ADX={float(regime.adx):.2f} BB_width={float(regime.bb_width):.4f}"
             )
-            await self.stop(reason="Regime Shift: TRENDING")
-            return
+            if regime.regime == MarketRegime.TRENDING:
+                logger.warning(
+                    f"[{self.symbol}] Trend detected! Cancelling grid to prevent trend-following risk."
+                )
+                await self.stop(reason="Regime Shift: TRENDING")
+                return
+        else:
+            logger.debug(
+                f"[{self.symbol}] Regime check skipped (throttled, next in "
+                f"{regime_check_interval - (current_time - self._last_regime_check_time):.0f}s)"
+            )
 
         # 2. Fill Detection and Counter-Order Placement
         if ticker is None:

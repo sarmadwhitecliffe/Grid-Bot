@@ -12,7 +12,7 @@
       "min_sharpe_ratio": -1.0,
       "min_win_rate": null,
       "max_drawdown": null,
-      "max_consecutive_losses": 8,
+      "max_consecutive_losses": 12,
       "capital_allocation_pct": 30,
       "min_leverage": 1,
       "max_leverage": 2,
@@ -21,14 +21,14 @@
     {
       "name": "CONSERVATIVE",
       "description": "Validated but underperforming; requires PF stability",
-      "min_trades": 15,
+      "min_trades": 45,
       "max_trades": null,
       "min_profit_factor": 0.8,
       "max_profit_factor": null,
       "min_sharpe_ratio": 0.0,
       "min_win_rate": 0.35,
       "max_drawdown": null,
-      "max_consecutive_losses": 6,
+      "max_consecutive_losses": 10,
       "capital_allocation_pct": 40,
       "min_leverage": 1,
       "max_leverage": 3,
@@ -37,14 +37,14 @@
     {
       "name": "STANDARD",
       "description": "Default tier for proven consistent symbols",
-      "min_trades": 30,
+      "min_trades": 90,
       "max_trades": null,
       "min_profit_factor": 1.5,
       "max_profit_factor": null,
       "min_sharpe_ratio": 0.5,
       "min_win_rate": 0.40,
       "max_drawdown": 0.25,
-      "max_consecutive_losses": 5,
+      "max_consecutive_losses": 8,
       "capital_allocation_pct": 50,
       "min_leverage": 1,
       "max_leverage": 5,
@@ -53,14 +53,14 @@
     {
       "name": "AGGRESSIVE",
       "description": "High-performing symbols with significant track record",
-      "min_trades": 45,
+      "min_trades": 135,
       "max_trades": null,
       "min_profit_factor": 2.5,
       "max_profit_factor": null,
       "min_sharpe_ratio": 1.0,
       "min_win_rate": 0.45,
       "max_drawdown": 0.15,
-      "max_consecutive_losses": 5,
+      "max_consecutive_losses": 7,
       "capital_allocation_pct": 65,
       "min_leverage": 1,
       "max_leverage": 7,
@@ -69,14 +69,14 @@
     {
       "name": "CHAMPION",
       "description": "Elite performance - maximum conviction sizing",
-      "min_trades": 60,
+      "min_trades": 180,
       "max_trades": null,
       "min_profit_factor": 3.0,
       "max_profit_factor": null,
       "min_sharpe_ratio": 1.5,
       "min_win_rate": 0.50,
       "max_drawdown": 0.12,
-      "max_consecutive_losses": 4,  
+      "max_consecutive_losses": 6,  
       "capital_allocation_pct": 80,
       "min_leverage": 1,
       "max_leverage": 10,
@@ -84,14 +84,14 @@
     }
   ],
   "settings": {
-    "lookback_trades": 30,
+    "lookback_trades": 90,
     "boundary_policy": "min_inclusive_max_exclusive",
     "tier_eval_order": ["CHAMPION", "AGGRESSIVE", "STANDARD", "CONSERVATIVE", "PROBATION"],
-    "pf_min_trades_for_validation": 12,
+    "pf_min_trades_for_validation": 36,
     "enable_kill_switch": true,
-    "kill_switch_consecutive_losses": 9,
+    "kill_switch_consecutive_losses": 15,
     "kill_switch_drawdown_pct": 30.0,
-    "kill_switch_pf_min_trades": 8,
+    "kill_switch_pf_min_trades": 24,
     "enable_drawdown_scaling": true,
     "drawdown_scale_threshold_pct": 10.0,
     "drawdown_scale_factor": 0.5,
@@ -110,12 +110,12 @@
     "CHAMPION": { "threshold_pct": 8.0, "factor": 0.5 }
   },
   "promotion_rules": {
-    "promote_after_trades": 5,
+    "promote_after_trades": 15,
     "promote_buffer_pf": 0.10,
-    "min_stay_trades": 10
+    "min_stay_trades": 30
   },
   "demotion_rules": {
-    "demote_after_losses": 3,
+    "demote_after_losses": 6,
     "demote_buffer_pf": 0.05
   },
   "volatility_sizing_caps": {
@@ -124,9 +124,10 @@
     "high": 4000
   },
   "metadata": {
-    "last_review_date": "2026-02-01",
+    "last_review_date": "2026-03-13",
     "auto_adjust_enabled": false,
-    "data_source": "backtest_rolling_30_trades"
+    "data_source": "grid_mode_optimized",
+    "grid_mode_multiplier": 3
   },
   "comments": {
     "capital_allocation_pct": "Percentage of available capital to use for position sizing",
