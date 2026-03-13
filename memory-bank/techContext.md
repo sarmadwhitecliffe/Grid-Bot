@@ -11,7 +11,7 @@ tags:
   - tech-context
 ai_note: "Generated with AI assistance."
 summary: "Technologies, setup, and constraints."
-post_date: "2026-02-22"
+post_date: "2026-03-14"
 ---
 
 ## Stack
@@ -25,3 +25,10 @@ post_date: "2026-02-22"
 - No hardcoded values in `src/`.
 - Secrets live only in `.env`.
 - Exchange I/O requires rate limiting and retries.
+
+## Grid Capital Management (2026-03-14)
+
+- Grid orders now validate against allocated capital before deployment
+- Formula: `max_levels = (capital × tier_allocation) / (min_notional / leverage)`
+- Example: $100 capital, PROBATION (30%, 2x) → 6+6 levels @ $5/order
+- Config: `grid_capital_constraint` (default: True), `grid_leverage` (optional)

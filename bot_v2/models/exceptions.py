@@ -47,6 +47,17 @@ class InsufficientCapitalError(TradingBotError):
     pass
 
 
+class InsufficientGridCapital(TradingBotError):
+    """
+    Raised when capital is insufficient for grid deployment.
+
+    This indicates the symbol's allocated capital cannot support
+    the minimum required grid levels given min_notional constraints.
+    """
+
+    pass
+
+
 class OrderExecutionError(ExchangeError):
     """Raised when order execution fails."""
 

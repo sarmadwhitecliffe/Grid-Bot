@@ -11,17 +11,43 @@ tags:
   - active-context
 ai_note: "Generated with AI assistance."
 summary: "Current focus, recent changes, and next steps."
-post_date: "2026-03-13"
+post_date: "2026-03-14"
 ---
 
 ## Current Focus
 
-- **Production Hardening (Phase 7)**: Fixing critical bugs discovered during live simulation:
-  - Order recovery on restart
-  - Performance metrics accuracy
-  - Autonomous grid auto-restart after hitting session TP
+- **Capital-Aware Grid Sizing**: Implementing dynamic grid parameter calculation based on allocated capital, tier allocation, and leverage constraints.
 
-## Recent Changes (2026-03-13)
+## Recent Changes (2026-03-14)
+
+### Feature: Capital-Aware Grid Order Sizing
+
+1. **Problem Identified**:
+   - Grid deployed 50 levels × $30/order = $1,500 exposure
+   - Symbol capital only $100 (30% of $100 = $30 effective)
+   - Exchange rejected orders with InsufficientFunds
+
+2. **Solution Implemented**:
+   - Added `InsufficientGridCapital` exception
+   - Added `grid_capital_constraint` config (default: True)
+   - Added `grid_leverage` config (optional override)
+   - Implemented `_calculate_grid_parameters()` in orchestrator.py
+
+3. **Calculation Formula**:
+   ```
+   allocated_margin = capital × tier_allocation
+   margin_per_level = min_notional / leverage
+   max_levels = allocated_margin / margin_per_level
+   ```
+
+4. **Example Result**:
+   ```
+   Capital: $100, Tier: PROBATION (30%, 2x leverage)
+   → 6 buy + 6 sell levels @ $5/order
+   (was 25+25 levels, reduced to capital constraints)
+   ```
+
+## Previous Changes (2026-03-13)
 
 ### Bug Fixes
 
@@ -48,12 +74,14 @@ post_date: "2026-03-13"
   "grid_session_tp_pct": "0.05",       // 5% TP threshold
   "grid_session_max_dd_pct": "0.07",   // 7% DD threshold
   "grid_reinvest_min_interval_seconds": 60,
-  "grid_auto_restart": true             // Auto-restart stopped grids
+  "grid_auto_restart": true,
+  "grid_capital_constraint": true,      // NEW: Capital-aware sizing
+  "grid_leverage": null                // NEW: Override leverage (null = use tier)
 }
 ```
 
 ## Next Steps
 
-1. Restart bot and verify grids recover from existing orders
-2. Monitor ADA/USDT which was stuck due to regime detection
-3. Verify auto-restart works after cooldown period
+1. Test capital-aware grid sizing with live symbols
+2. Verify grid levels scale up as capital/tier improves
+3. Monitor for any edge cases with minimal capital

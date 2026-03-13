@@ -655,6 +655,7 @@ class TradingBot:
                     order_manager=order_manager,
                     exchange=exchange,
                     risk_manager=self.risk_manager,
+                    capital_manager=self.capital_manager,
                     on_grid_trade_closed=self._on_grid_trade_closed,
                     on_grid_fill=self._on_grid_fill,
                 )

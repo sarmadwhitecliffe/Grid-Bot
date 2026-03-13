@@ -159,6 +159,10 @@ class StrategyConfig:
     grid_reinvest_min_interval_seconds: int = 60  # Cooldown between re-investments
     grid_auto_restart: bool = True  # Auto-restart stopped grids that had activity
 
+    # === GRID CAPITAL MANAGEMENT ===
+    grid_capital_constraint: bool = True  # Enable capital-aware grid sizing
+    grid_leverage: Optional[int] = None  # Override leverage for grids (None = use tier)
+
     @classmethod
     def from_dict(cls, symbol_id: str, data: dict) -> "StrategyConfig":
         """

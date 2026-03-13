@@ -2,7 +2,7 @@
     "BTC/USDT": {
         "enabled": true,
         "mode": "local_sim",
-        "initial_capital": "2000.0",
+        "initial_capital": "100.0",
         "leverage": "3",
         "capital_usage_percent": "100",
         "timeframe": "15m",
@@ -21,7 +21,7 @@
     "ETH/USDT": {
         "enabled": true,
         "mode": "local_sim",
-        "initial_capital": "2000.0",
+        "initial_capital": "100.0",
         "leverage": "2",
         "capital_usage_percent": "100",
         "timeframe": "15m",
@@ -40,7 +40,7 @@
     "LINK/USDT": {
         "enabled": true,
         "mode": "local_sim",
-        "initial_capital": "2000.0",
+        "initial_capital": "100.0",
         "leverage": "2",
         "capital_usage_percent": "100",
         "timeframe": "15m",
@@ -59,7 +59,7 @@
     "BCH/USDT": {
         "enabled": true,
         "mode": "local_sim",
-        "initial_capital": "2000.0",
+        "initial_capital": "100.0",
         "leverage": "2",
         "capital_usage_percent": "100",
         "timeframe": "15m",
@@ -78,7 +78,7 @@
     "SOL/USDT": {
         "enabled": true,
         "mode": "local_sim",
-        "initial_capital": "2000.0",
+        "initial_capital": "100.0",
         "leverage": "1",
         "capital_usage_percent": "100",
         "timeframe": "15m",
@@ -97,7 +97,7 @@
     "ADA/USDT": {
         "enabled": true,
         "mode": "local_sim",
-        "initial_capital": "2000.0",
+        "initial_capital": "100.0",
         "leverage": "1",
         "capital_usage_percent": "100",
         "timeframe": "15m",
