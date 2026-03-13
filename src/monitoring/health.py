@@ -84,7 +84,7 @@ class HealthMonitor:
             self._persist_metrics()
 
             if self.alert_on_corruption:
-                self._trigger_alert("corruption", "Data corruption detected")
+                logger.warning("Data corruption detected")
 
     def record_recovery(self, success: bool = True) -> None:
         """Record a recovery operation."""
@@ -195,25 +195,6 @@ class HealthMonitor:
                 json.dump(metrics, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to persist metrics: {e}")
-
-    def _trigger_alert(self, alert_type: str, message: str) -> None:
-        """Trigger an alert."""
-        logger.warning(f"ALERT [{alert_type}]: {message}")
-
-        try:
-            self._send_telegram_alert(alert_type, message)
-        except Exception as e:
-            logger.error(f"Failed to send Telegram alert: {e}")
-
-    def _send_telegram_alert(self, alert_type: str, message: str) -> None:
-        """Send Telegram alert if available."""
-        try:
-            from src.monitoring.alerting import TelegramAlerter
-
-            alerter = TelegramAlerter(token="", chat_id="")
-            alerter.send_message(f"[{alert_type.upper()}] {message}")
-        except ImportError:
-            pass
 
     def export_prometheus_metrics(self) -> str:
         """Export metrics in Prometheus format."""

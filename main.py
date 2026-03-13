@@ -24,7 +24,7 @@ import structlog
 from config.settings import settings
 from src.data.price_feed import PriceFeed
 from src.exchange.exchange_client import ExchangeClient
-from src.monitoring.alerting import TelegramAlerter
+from src.notification import Notifier
 from src.oms.fill_handler import FillHandler
 from src.oms.order_manager import OrderManager
 from src.persistence.state_store import StateStore
@@ -62,7 +62,7 @@ class GridBot:
         self._running: bool = False
         self._exchange: Optional[ExchangeClient] = None
         self._price_feed: Optional[PriceFeed] = None
-        self._alerter: Optional[TelegramAlerter] = None
+        self._notifier: Optional[Notifier] = None
         self._order_manager: Optional[OrderManager] = None
         self._fill_handler: Optional[FillHandler] = None
         self._risk_manager: Optional[RiskManager] = None
@@ -86,7 +86,7 @@ class GridBot:
             adx_threshold=settings.ADX_THRESHOLD,
             bb_width_threshold=0.04,
         )
-        self._alerter = TelegramAlerter(
+        self._notifier = Notifier(
             token=settings.TELEGRAM_BOT_TOKEN or "",
             chat_id=settings.TELEGRAM_CHAT_ID or "",
         )
@@ -168,8 +168,10 @@ class GridBot:
         levels = self._calculator.calculate(centre)
         await self._order_manager.deploy_grid(levels)
         log.info("Grid deployed", centre=centre, n_levels=len(levels))
-        if self._alerter:
-            await self._alerter.alert_grid_deployed(settings.SYMBOL, centre, len(levels))
+        if self._notifier:
+            await self._notifier.alert_grid_deployed(
+                settings.SYMBOL, centre, len(levels)
+            )
         self._centre_price = centre
 
     async def _trading_loop(self) -> None:
@@ -197,7 +199,7 @@ class GridBot:
                     if self._order_manager.open_order_count > 0:
                         log.info("Market trending — cancelling grid.")
                         await self._order_manager.cancel_all_orders()
-                        await self._alerter.alert_risk_action(
+                        await self._notifier.alert_risk_action(
                             "PAUSE_ADX", regime.reason
                         )
                     await asyncio.sleep(LOOP_SLEEP)
@@ -235,7 +237,7 @@ class GridBot:
                         action=risk_action.action.value,
                         reason=risk_action.reason,
                     )
-                    await self._alerter.alert_risk_action(
+                    await self._notifier.alert_risk_action(
                         risk_action.action.value, risk_action.reason
                     )
                     await self._order_manager.cancel_all_orders()
@@ -273,8 +275,8 @@ class GridBot:
         if self._order_manager:
             await self._order_manager.cancel_all_orders()
         await self._persist_state()
-        if self._alerter:
-            await self._alerter.alert_shutdown(reason)
+        if self._notifier:
+            await self._notifier.alert_shutdown(reason)
         if self._exchange:
             await self._exchange.close()
         log.info("GridBot stopped.")

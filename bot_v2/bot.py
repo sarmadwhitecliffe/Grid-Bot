@@ -35,7 +35,7 @@ from bot_v2.models.position_v1 import PositionState as PositionV1
 from bot_v2.models.position_v1 import PositionStatus as PositionStatusV1
 from bot_v2.models.position_v1 import TradeSide as TradeSideV1
 from bot_v2.models.strategy_config import StrategyConfig
-from bot_v2.notifications.notifier import Notifier
+from src.notification import Notifier
 from bot_v2.persistence.state_manager import StateManager
 from bot_v2.position.tracker import PositionTracker
 from bot_v2.position.trailing_stop import TrailingStopCalculator

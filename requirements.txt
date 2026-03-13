@@ -10,7 +10,6 @@ pytest-asyncio
 pytest-mock
 python-dotenv
 python-logging-loki
-python-telegram-bot
 redis
 requests
 structlog
