@@ -59,6 +59,10 @@ ENABLE_GRID_LATENCY_LOGGING = (
     os.getenv("ENABLE_GRID_LATENCY_LOGGING", "true").lower() == "true"
 )
 GRID_LATENCY_WARN_MS = float(os.getenv("GRID_LATENCY_WARN_MS", "1500"))
+GRID_LATENCY_WARN_INTERVAL_SECS = float(
+    os.getenv("GRID_LATENCY_WARN_INTERVAL_SECS", "60")
+)
+GRID_LATENCY_WARN_DELTA_MS = float(os.getenv("GRID_LATENCY_WARN_DELTA_MS", "500"))
 
 # Constants (EXACT from bot_v1 line 72)
 HEARTBEAT_INTERVAL_SECONDS: int = 3600  # Send heartbeat every hour
@@ -373,6 +377,10 @@ class TradingBot:
         self._price_cache: dict[str, dict] = {}
         # Debounce map for status notifications: (symbol,event) -> last_sent_ts
         self._status_debounce: dict[tuple[str, str], float] = {}
+        # Grid latency warning throttling (avoid per-tick warning spam)
+        self._grid_latency_last_warn_ts = 0.0
+        self._grid_latency_last_warn_ms = 0.0
+        self._grid_latency_suppressed_count = 0
 
         # Concurrency control (Phase 1: Bounded Concurrency)
         max_concurrency = int(os.getenv("MAX_SIGNAL_CONCURRENCY", "1"))
@@ -2757,13 +2765,28 @@ class TradingBot:
         tick_ms = max(total_ms - fetch_ms, 0.0)
         # Only log performance warnings when exceeding threshold to reduce noise
         if ENABLE_GRID_LATENCY_LOGGING and total_ms >= GRID_LATENCY_WARN_MS:
-            logger.warning(
-                "[GRID][PERF] active=%d fetch_ms=%.1f tick_ms=%.1f total_ms=%.1f",
-                len(active),
-                fetch_ms,
-                tick_ms,
-                total_ms,
+            now = time.time()
+            elapsed_since_last = now - self._grid_latency_last_warn_ts
+            latency_jump_ms = abs(total_ms - self._grid_latency_last_warn_ms)
+            should_log = (
+                self._grid_latency_last_warn_ts == 0.0
+                or elapsed_since_last >= GRID_LATENCY_WARN_INTERVAL_SECS
+                or latency_jump_ms >= GRID_LATENCY_WARN_DELTA_MS
             )
+            if should_log:
+                logger.warning(
+                    "[GRID][PERF] active=%d fetch_ms=%.1f tick_ms=%.1f total_ms=%.1f suppressed=%d",
+                    len(active),
+                    fetch_ms,
+                    tick_ms,
+                    total_ms,
+                    self._grid_latency_suppressed_count,
+                )
+                self._grid_latency_last_warn_ts = now
+                self._grid_latency_last_warn_ms = total_ms
+                self._grid_latency_suppressed_count = 0
+            else:
+                self._grid_latency_suppressed_count += 1
 
     async def _process_grid_orchestrator_tick(
         self,

@@ -203,7 +203,7 @@ class StateManager:
                     except Exception:
                         pass
 
-                logger.debug(f"Saved state to {file_path} (atomic)")
+                #logger.debug(f"Saved state to {file_path} (atomic)")
 
         except (IOError, TypeError, OSError) as e:
             logger.error(f"Error saving state to {file_path}: {e}", exc_info=True)
@@ -409,7 +409,8 @@ class StateManager:
 
         self._save_json(history, self.grid_history_file)
         if len(history) > 0:
-            logger.info(f"Saved {len(history)} grid trade history entries")
+            #logger.info(f"Saved {len(history)} grid trade history entries")
+            pass
         else:
             logger.debug("Saved grid trade history (empty)")
 
