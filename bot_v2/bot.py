@@ -2739,22 +2739,51 @@ class TradingBot:
         if not active:
             return
 
-        # NOTE: Use sequential fetches here.
-        # Concurrent fetches against a shared exchange instance can saturate its
-        # internal throttle queue and cause repeated per-tick timeouts.
-        fetch_results = []
+        # NOTE: Use concurrent fetches by default.
+        # The sequential approach caused 10+ second ticks with multiple symbols.
+        # Enable/disable via ENABLE_CONCURRENT_GRID_FETCH env var.
+        ENABLE_CONCURRENT_GRID_FETCH = (
+            os.getenv("ENABLE_CONCURRENT_GRID_FETCH", "true").lower() == "true"
+        )
         fetch_timeout_secs = float(os.getenv("GRID_OHLCV_FETCH_TIMEOUT_SECS", "20"))
-        for symbol, _ in active:
-            config = self.strategy_configs[symbol]
-            exchange = self._get_exchange_for_symbol(symbol)
-            try:
-                ohlcv = await asyncio.wait_for(
-                    exchange.fetch_ohlcv(symbol, config.timeframe, 100),
-                    timeout=fetch_timeout_secs,
+
+        if ENABLE_CONCURRENT_GRID_FETCH:
+
+            async def fetch_with_timeout(symbol, config, exchange, timeout):
+                try:
+                    return await asyncio.wait_for(
+                        exchange.fetch_ohlcv(symbol, config.timeframe, 100),
+                        timeout=timeout,
+                    )
+                except Exception as exc:
+                    return exc
+
+            fetch_coroutines = [
+                fetch_with_timeout(
+                    symbol,
+                    self.strategy_configs[symbol],
+                    self._get_exchange_for_symbol(symbol),
+                    fetch_timeout_secs,
                 )
-            except Exception as exc:
-                ohlcv = exc
-            fetch_results.append(ohlcv)
+                for symbol, _ in active
+            ]
+            fetch_results = await asyncio.gather(
+                *fetch_coroutines, return_exceptions=True
+            )
+        else:
+            # Sequential fallback
+            fetch_results = []
+            for symbol, _ in active:
+                config = self.strategy_configs[symbol]
+                exchange = self._get_exchange_for_symbol(symbol)
+                try:
+                    ohlcv = await asyncio.wait_for(
+                        exchange.fetch_ohlcv(symbol, config.timeframe, 100),
+                        timeout=fetch_timeout_secs,
+                    )
+                except Exception as exc:
+                    ohlcv = exc
+                fetch_results.append(ohlcv)
         fetch_ms = (time.perf_counter() - tick_start) * 1000.0
 
         tick_tasks = []

@@ -59,7 +59,7 @@ class MarketDataCache:
         import os
 
         self._price_ttl = float(os.getenv("PRICE_TTL_SECONDS", "3"))
-        self._ohlcv_ttl = float(os.getenv("OHLCV_TTL_SECONDS", "20"))
+        self._ohlcv_ttl = float(os.getenv("OHLCV_TTL_SECONDS", "60"))
 
         # Statistics
         self._hits = 0
