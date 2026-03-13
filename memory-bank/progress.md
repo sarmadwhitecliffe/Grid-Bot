@@ -11,35 +11,43 @@ tags:
   - progress
 ai_note: "Generated with AI assistance."
 summary: "Progress, known issues, and phase status."
-post_date: "2026-02-22"
+post_date: "2026-03-13"
 ---
 
 ## Status
 
 - **Phase 1-5 (Core Development)**: Completed. The core architecture (Config, Data, Exchange, Strategy, OMS, Risk, Persistence, Monitoring) is fully implemented.
-- **Phase 6 (Backtest Validation & Futures Transition)**: In Progress (Near Completion).
-  - Completed Transition to USDT-M Futures with Dual-Side grid logic (Longs + Shorts).
-  - Completed implementation of isolated margin and liquidation safety checks.
-  - Test suite completely green after fixing Python async mocking bugs.
-  - Parameter optimization script (`scripts/optimize_params.py`) implemented and capable of automated walk-forward validation.
+- **Phase 6 (Backtest Validation & Futures Transition)**: Completed.
+- **Phase 7 (Production Hardening)**: In Progress.
+  - Autonomous grid trading with auto-reinvest after hitting session TP.
+  - Order recovery fix on restart.
+  - Performance metrics accuracy fix.
+
+## Recent Fixes (2026-03-13)
+
+### 1. Performance Metrics Fix
+- Fixed `symbol_performance.json` using wrong initial capital (100 instead of actual config value)
+- Added `initial_capital` parameter to `PerformanceAnalyzer.calculate_metrics()`
+- Updated all callers to pass actual capital from config
+
+### 2. Grid Auto-Restart Feature
+- Added `grid_auto_restart` config option (default: True)
+- Added `_maybe_restart_grid()` method to automatically restart stopped grids
+- Added cooldown mechanism to prevent rapid restarts
+- Grid now continues trading autonomously after hitting TP/DD
+
+### 3. Order Recovery Fix
+- Fixed symbol format mismatch in `OrderStateManager.get_open_orders_by_symbol()`
+- Orders stored as "BTCUSDT" but queried as "BTC/USDT"
+- Now uses `normalize_to_market_format()` from symbol_utils.py
 
 ## Remaining to Build
 
-- Wait for automated grid-search optimization to finish to determine the most profitable parameters.
-- Record the best parameter set in `plan/backtest-results.md` and `config/grid_config_optimized.yaml`.
-- Execute a final smoke test on Binance Futures Testnet to verify live order execution with dual-side hedge mode.
+- Monitor live trading behavior after fixes
+- Complete production hardening checklist
 
 ## Known Issues
 
-- Optimization takes significant time due to CCXT Binance Futures API rate limiting on OHLCV fetches. Parquet caching has been added to mitigate repeated fetches.
-
-## Milestone Log
-
-### 2026-03-10
-- **Phase 5 Hardening (Production Readiness):**
-  - **Unified Order Tracking:** Refactored `OrderManager`, `SimulatedExchange`, and `GridOrchestrator` to use a single persistent `OrderStateManager`. Fixed "split-brain" tracking where orders were forgotten on restart.
-  - **Portfolio-Level Risk:** Implemented `GlobalRiskManager` with a 20% total account drawdown kill switch.
-  - **Decimal Precision Refactor:** Replaced all `float` calculations in the trading path with `Decimal` to eliminate rounding drift and prevent order rejection.
-  - **Async IO & Atomic Persistence:** Implemented non-blocking background thread saving and `asyncio.Lock` for all state files to prevent heartbeat freezes and data corruption.
-  - **Resilience Verification:** Successfully passed adversarial stress tests involving process killing and state recovery.
-  - **Grid Sizing:** Fully integrated Adaptive Risk Tiers into Grid deployment (e.g., 30% probation sizing).
+- Previously: Order recovery failed on restart (fixed)
+- Previously: Performance metrics showed wrong equity values (fixed)
+- Previously: Grid stopped after TP and required manual restart (fixed)

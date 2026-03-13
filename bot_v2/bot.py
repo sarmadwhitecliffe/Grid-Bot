@@ -971,7 +971,10 @@ class TradingBot:
                 await self._persist_state()
 
                 # Periodic Maintenance (Pruning every 6 hours)
-                if current_time - self.last_prune_time > self.order_state_prune_interval_sec:
+                if (
+                    current_time - self.last_prune_time
+                    > self.order_state_prune_interval_sec
+                ):
                     logger.info("Running periodic order state pruning...")
                     # Run in background to avoid blocking heartbeat
                     asyncio.create_task(self.order_state_manager.prune_archive())
@@ -2666,12 +2669,23 @@ class TradingBot:
                 "timestamp": now_iso,
                 "is_active": bool(getattr(orchestrator, "is_active", False)),
                 "centre_price": str(centre_price) if centre_price is not None else None,
-                "open_order_count": int(len(getattr(orchestrator, "grid_order_ids", set()))),
-                "session_fill_count": int(getattr(orchestrator, "session_fill_count", 0)),
-                "session_buy_qty": str(getattr(orchestrator, "session_buy_qty", Decimal("0"))),
-                "session_sell_qty": str(getattr(orchestrator, "session_sell_qty", Decimal("0"))),
+                "open_order_count": int(
+                    len(getattr(orchestrator, "grid_order_ids", set()))
+                ),
+                "session_fill_count": int(
+                    getattr(orchestrator, "session_fill_count", 0)
+                ),
+                "session_buy_qty": str(
+                    getattr(orchestrator, "session_buy_qty", Decimal("0"))
+                ),
+                "session_sell_qty": str(
+                    getattr(orchestrator, "session_sell_qty", Decimal("0"))
+                ),
                 "session_realized_pnl_quote": str(
                     getattr(orchestrator, "session_realized_pnl_quote", Decimal("0"))
+                ),
+                "session_reinvest_count": int(
+                    getattr(orchestrator, "session_reinvest_count", 0)
                 ),
             }
         self.state_manager.save_grid_exposure_snapshot(exposure_snapshot)
@@ -3644,7 +3658,14 @@ class TradingBot:
 
             # Combine directional and grid histories for symbol-level performance tracking.
             combined_history = [*self.trade_history, *self.grid_trade_history]
-            metrics = PerformanceAnalyzer.calculate_metrics(symbol, combined_history)
+
+            # Get capital for this symbol to use as initial_capital for metrics
+            all_capitals = self.capital_manager.get_all_capitals()
+            initial_capital = float(all_capitals.get(symbol, Decimal("100.0")))
+
+            metrics = PerformanceAnalyzer.calculate_metrics(
+                symbol, combined_history, initial_capital=initial_capital
+            )
 
             # Update cache and save (access the wrapped risk_manager)
             self.risk_manager.risk_manager.performance_cache[symbol] = metrics

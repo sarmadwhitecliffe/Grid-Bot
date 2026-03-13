@@ -395,7 +395,10 @@ class PerformanceMetrics:
 class PerformanceAnalyzer:
     @staticmethod
     def calculate_metrics(
-        symbol: str, trade_history: List[Dict[str, Any]], lookback_trades: int = 20
+        symbol: str,
+        trade_history: List[Dict[str, Any]],
+        lookback_trades: int = 20,
+        initial_capital: float = 100.0,
     ) -> PerformanceMetrics:
         symbol_trades = [t for t in trade_history if t.get("symbol") == symbol]
         total_trades = len(symbol_trades)
@@ -417,8 +420,8 @@ class PerformanceAnalyzer:
                 0,
                 0,
                 0.0,
-                100.0,
-                100.0,
+                initial_capital,
+                initial_capital,
                 datetime.now(timezone.utc).isoformat(),
                 None,
                 0.0,
@@ -486,7 +489,7 @@ class PerformanceAnalyzer:
             sharpe_ratio = 0.0
             std_dev_returns = 0.0
 
-        equity = 100.0
+        equity = initial_capital
         peak_equity = equity
         max_dd = 0.0
 
@@ -503,7 +506,7 @@ class PerformanceAnalyzer:
         current_dd_pct = (
             (peak_equity - current_equity) / peak_equity if peak_equity > 0 else 0.0
         )
-        starting_equity = 100.0
+        starting_equity = initial_capital
         net_profit = current_equity - starting_equity
         recovery_factor = net_profit / (max_dd * starting_equity) if max_dd > 0 else 0.0
 
@@ -953,7 +956,8 @@ class PositionSizer:
         # Apply tier leverage band and quantize to exchange-compatible integer
         # leverage. Round is used to preserve intent better than truncation.
         bounded_leverage = max(
-            float(tier.min_leverage), min(float(kelly_leverage), float(tier.max_leverage))
+            float(tier.min_leverage),
+            min(float(kelly_leverage), float(tier.max_leverage)),
         )
         final_leverage = int(round(bounded_leverage))
 
@@ -1069,7 +1073,7 @@ class PositionSizer:
         # Maps WR from [0.5, 1.0] -> [0, 1]. Below 50% WR scores 0.
         wr_score = max(0.0, (win_rate - 0.5)) / 0.5
 
-        atr_score = atr/(atr+1) if atr else 0
+        atr_score = atr / (atr + 1) if atr else 0
 
         # --- Component 3: Kelly score (weight 0.20) ---
         # Traditional kelly_f, clamped to [0, 1]
@@ -1097,6 +1101,7 @@ class PositionSizer:
         )
 
         return leverage_quantized
+
 
 class PortfolioRiskMonitor:
     MAX_PORTFOLIO_HEAT = 0.08
@@ -1217,6 +1222,7 @@ class AdaptiveRiskManager:
             symbol,
             trade_history,
             lookback_trades=int(SETTINGS.get("lookback_trades", 30)),
+            initial_capital=capital,
         )
         logger.info(
             f"📊 {symbol}: Calculated metrics - trades={metrics.total_trades}, "

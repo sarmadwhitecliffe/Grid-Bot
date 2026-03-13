@@ -68,9 +68,13 @@ class StrategyConfig:
     # NOTE: Default increased from 3% to 15% to allow trending trades more breathing room
     ape_use_post_tp1_measurement: bool = True
     post_tp1_ape_grace_seconds: int = 120
-    post_tp1_ape_initial_pullback_pct: Decimal = Decimal("0.15")  # First 3 min: 15% tolerance
+    post_tp1_ape_initial_pullback_pct: Decimal = Decimal(
+        "0.15"
+    )  # First 3 min: 15% tolerance
     post_tp1_ape_initial_minutes: int = 3
-    post_tp1_ape_base_pullback_pct: Decimal = Decimal("0.15")  # Base: 15% pullback tolerance
+    post_tp1_ape_base_pullback_pct: Decimal = Decimal(
+        "0.15"
+    )  # Base: 15% pullback tolerance
     # Config-driven APE thresholds (defaults allow trending trades to develop)
     ape_min_r: Decimal = Decimal("0.3")  # Min peak R before APE considered
     ape_pullback_pct: Decimal = Decimal(
@@ -85,9 +89,7 @@ class StrategyConfig:
     # === ADVERSE SCALE-OUT ===
     partial_exit_on_adverse_r: Decimal = Decimal("2.5")
     partial_exit_pct: Decimal = Decimal("50")
-    scaleout_grace_period_seconds: int = (
-        300  # Grace period after adverse scale-out before soft SL can trigger (default: 5 minutes)
-    )
+    scaleout_grace_period_seconds: int = 300  # Grace period after adverse scale-out before soft SL can trigger (default: 5 minutes)
 
     # === GIVEBACK PROTECTION ===
     max_giveback_pct: Decimal = Decimal("15")
@@ -142,7 +144,20 @@ class StrategyConfig:
     grid_adx_threshold: int = 30
     grid_bb_width_threshold: Decimal = Decimal("0.04")
     grid_max_open_orders: int = 100
-    grid_stop_policy: str = "cancel_open_orders"  # cancel_open_orders | keep_open_orders
+    grid_stop_policy: str = (
+        "cancel_open_orders"  # cancel_open_orders | keep_open_orders
+    )
+
+    # === GRID SESSION MANAGEMENT ===
+    grid_session_tp_reinvest: bool = (
+        True  # Re-invest gains after hitting TP instead of stopping
+    )
+    grid_session_tp_pct: Decimal = Decimal("0.05")  # Session take profit threshold (5%)
+    grid_session_max_dd_pct: Decimal = Decimal(
+        "0.07"
+    )  # Session max drawdown threshold (7%)
+    grid_reinvest_min_interval_seconds: int = 60  # Cooldown between re-investments
+    grid_auto_restart: bool = True  # Auto-restart stopped grids that had activity
 
     @classmethod
     def from_dict(cls, symbol_id: str, data: dict) -> "StrategyConfig":
@@ -268,12 +283,26 @@ class StrategyConfig:
             grid_spacing_pct=to_decimal(data.get("grid_spacing_pct", "0.01")),
             grid_num_grids_up=int(data.get("grid_num_grids_up", 25)),
             grid_num_grids_down=int(data.get("grid_num_grids_down", 25)),
-            grid_order_size_quote=to_decimal(data.get("grid_order_size_quote", "100.0")),
+            grid_order_size_quote=to_decimal(
+                data.get("grid_order_size_quote", "100.0")
+            ),
             grid_recentre_trigger=int(data.get("grid_recentre_trigger", 3)),
             grid_adx_threshold=int(data.get("grid_adx_threshold", 30)),
-            grid_bb_width_threshold=to_decimal(data.get("grid_bb_width_threshold", "0.04")),
+            grid_bb_width_threshold=to_decimal(
+                data.get("grid_bb_width_threshold", "0.04")
+            ),
             grid_max_open_orders=int(data.get("grid_max_open_orders", 100)),
             grid_stop_policy=data.get("grid_stop_policy", "cancel_open_orders"),
+            # Grid Session Management
+            grid_session_tp_reinvest=bool(data.get("grid_session_tp_reinvest", True)),
+            grid_session_tp_pct=to_decimal(data.get("grid_session_tp_pct", "0.05")),
+            grid_session_max_dd_pct=to_decimal(
+                data.get("grid_session_max_dd_pct", "0.07")
+            ),
+            grid_reinvest_min_interval_seconds=int(
+                data.get("grid_reinvest_min_interval_seconds", 60)
+            ),
+            grid_auto_restart=bool(data.get("grid_auto_restart", True)),
         )
 
     def to_dict(self) -> dict:
@@ -358,4 +387,10 @@ class StrategyConfig:
             "grid_bb_width_threshold": decimal_to_str(self.grid_bb_width_threshold),
             "grid_max_open_orders": self.grid_max_open_orders,
             "grid_stop_policy": self.grid_stop_policy,
+            # Grid Session Management
+            "grid_session_tp_reinvest": self.grid_session_tp_reinvest,
+            "grid_session_tp_pct": decimal_to_str(self.grid_session_tp_pct),
+            "grid_session_max_dd_pct": decimal_to_str(self.grid_session_max_dd_pct),
+            "grid_reinvest_min_interval_seconds": self.grid_reinvest_min_interval_seconds,
+            "grid_auto_restart": self.grid_auto_restart,
         }

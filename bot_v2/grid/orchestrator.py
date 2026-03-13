@@ -42,7 +42,9 @@ class GridOrchestrator:
         order_manager: Any,
         exchange: Any,
         risk_manager: Optional[Any] = None,
-        on_grid_trade_closed: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        on_grid_trade_closed: Optional[
+            Callable[[Dict[str, Any]], Awaitable[None]]
+        ] = None,
         on_grid_fill: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self.symbol = symbol
@@ -74,6 +76,9 @@ class GridOrchestrator:
         self.session_fill_count = 0
         self.session_buy_qty = Decimal("0")
         self.session_sell_qty = Decimal("0")
+        self.last_reinvest_time: Optional[float] = None
+        self.session_reinvest_count = 0
+        self.last_stop_time: Optional[float] = None
         # Open inventory lots used to pair fills into closed grid trades.
         self._open_long_lots: List[Dict[str, Any]] = []
         self._open_short_lots: List[Dict[str, Any]] = []
@@ -109,8 +114,9 @@ class GridOrchestrator:
                         "pnl_usd": str(pnl),
                         "entry_time": lot["entry_time"],
                         "exit_time": now.isoformat(),
-                        "duration_sec": (now - datetime.fromisoformat(lot["entry_time"]))
-                        .total_seconds(),
+                        "duration_sec": (
+                            now - datetime.fromisoformat(lot["entry_time"])
+                        ).total_seconds(),
                         "open_order_id": lot.get("order_id"),
                         "close_order_id": filled_order_id,
                         "source": "grid",
@@ -148,8 +154,9 @@ class GridOrchestrator:
                         "pnl_usd": str(pnl),
                         "entry_time": lot["entry_time"],
                         "exit_time": now.isoformat(),
-                        "duration_sec": (now - datetime.fromisoformat(lot["entry_time"]))
-                        .total_seconds(),
+                        "duration_sec": (
+                            now - datetime.fromisoformat(lot["entry_time"])
+                        ).total_seconds(),
                         "open_order_id": lot.get("order_id"),
                         "close_order_id": filled_order_id,
                         "source": "grid",
@@ -260,6 +267,8 @@ class GridOrchestrator:
 
     async def stop(self, reason: str = "Manual Stop"):
         """Gracefully stop the grid and cancel orders."""
+        import time as time_module
+
         logger.info(f"[{self.symbol}] Stopping Grid session: {reason}")
         cancel_policy = getattr(self.config, "grid_stop_policy", "cancel_open_orders")
         should_cancel = cancel_policy != "keep_open_orders"
@@ -275,6 +284,130 @@ class GridOrchestrator:
         self.grid_order_ids.clear()
         self.order_metadata.clear()
         self.is_active = False
+        self.last_stop_time = time_module.time()
+
+    async def _bank_and_reinvest(self, reason: str = "Session TP"):
+        """Bank realized gains, reset session trackers, and deploy a new grid.
+
+        This enables autonomous continuous trading by automatically starting
+        a fresh profit cycle after hitting session take profit targets.
+        """
+        import time as time_module
+
+        current_time = time_module.time()
+        min_interval = getattr(self.config, "grid_reinvest_min_interval_seconds", 60)
+
+        if self.last_reinvest_time is not None:
+            elapsed = current_time - self.last_reinvest_time
+            if elapsed < min_interval:
+                logger.info(
+                    f"[{self.symbol}] Re-invest cooldown active ({elapsed:.1f}s < {min_interval}s). "
+                    f"Stopping instead."
+                )
+                await self.stop(reason=f"{reason}: Cooldown Active")
+                return
+
+        logger.info(
+            f"[{self.symbol}] Session Take Profit hit! Banking gains and re-deploying grid. "
+            f"Session PnL: {float(self.session_realized_pnl_quote):.2f}, "
+            f"Reinvest count: {self.session_reinvest_count}"
+        )
+
+        cancel_policy = getattr(self.config, "grid_stop_policy", "cancel_open_orders")
+        should_cancel = cancel_policy != "keep_open_orders"
+
+        if should_cancel and hasattr(self.order_manager, "cancel_orders_for_symbol"):
+            try:
+                await self.order_manager.cancel_orders_for_symbol(self.symbol)
+            except Exception as e:
+                logger.warning(
+                    f"[{self.symbol}] Failed to cancel grid orders during re-invest: {e}"
+                )
+
+        self.grid_order_ids.clear()
+        self.order_metadata.clear()
+
+        self.session_realized_pnl_quote = Decimal("0")
+        self.session_fill_count = 0
+        self.session_buy_qty = Decimal("0")
+        self.session_sell_qty = Decimal("0")
+        self._open_long_lots.clear()
+        self._open_short_lots.clear()
+
+        self.last_reinvest_time = current_time
+        self.session_reinvest_count += 1
+
+        try:
+            ticker = await self.exchange.get_market_price(self.symbol)
+            if ticker:
+                await self.deploy_grid(Decimal(str(ticker)))
+                logger.info(
+                    f"[{self.symbol}] Grid re-deployed successfully after {reason}. "
+                    f"New centre: {float(self.centre_price) if self.centre_price else 'N/A'}"
+                )
+            else:
+                logger.error(
+                    f"[{self.symbol}] Failed to get market price for re-deployment. Stopping."
+                )
+                self.is_active = False
+        except Exception as e:
+            logger.error(
+                f"[{self.symbol}] Failed to re-deploy grid after {reason}: {e}"
+            )
+            self.is_active = False
+
+    async def _maybe_restart_grid(self) -> bool:
+        """Check if a stopped grid should auto-restart.
+
+        Returns True if grid was restarted, False otherwise.
+        """
+        import time as time_module
+
+        if self.is_active:
+            return False
+
+        if not getattr(self.config, "grid_auto_restart", True):
+            return False
+
+        min_interval = getattr(self.config, "grid_reinvest_min_interval_seconds", 60)
+
+        if self.last_stop_time is None:
+            return False
+
+        elapsed = time_module.time() - self.last_stop_time
+        if elapsed < min_interval:
+            logger.debug(
+                f"[{self.symbol}] Auto-restart cooldown active ({elapsed:.1f}s < {min_interval}s)."
+            )
+            return False
+
+        if self.session_fill_count == 0:
+            logger.debug(f"[{self.symbol}] No session fills, skipping auto-restart.")
+            return False
+
+        initial_capital = Decimal(
+            str(getattr(self.config, "initial_capital", Decimal("1")))
+        )
+        if initial_capital <= Decimal("0"):
+            initial_capital = Decimal("1")
+
+        session_pnl_pct = self.session_realized_pnl_quote / initial_capital
+        max_dd_pct = getattr(self.config, "grid_session_max_dd_pct", Decimal("0.07"))
+
+        if session_pnl_pct < -max_dd_pct:
+            logger.warning(
+                f"[{self.symbol}] Session PnL {float(session_pnl_pct) * 100:.2f}% below max DD threshold, "
+                f"not auto-restarting."
+            )
+            return False
+
+        logger.info(
+            f"[{self.symbol}] Auto-restarting grid after stop. "
+            f"Session: {self.session_fill_count} fills, PnL: {float(self.session_realized_pnl_quote):.2f}"
+        )
+
+        await self.start()
+        return True
 
     async def deploy_grid(self, centre: Decimal):
         """Calculate and place all limit orders."""
@@ -347,7 +480,10 @@ class GridOrchestrator:
     async def tick(self, ohlcv_df: Any, current_price: Optional[Decimal] = None):
         """Perform periodic maintenance (regime check, fill polling, risk guards)."""
         if not self.is_active:
-            return
+            if await self._maybe_restart_grid():
+                logger.info(f"[{self.symbol}] Grid auto-restarted, continuing tick.")
+            else:
+                return
 
         ticker = current_price
 
@@ -363,23 +499,36 @@ class GridOrchestrator:
         )
         if initial_capital <= Decimal("0"):
             initial_capital = Decimal("1")
+
+        session_tp_pct = getattr(self.config, "grid_session_tp_pct", Decimal("0.05"))
+        session_max_dd_pct = getattr(
+            self.config, "grid_session_max_dd_pct", Decimal("0.07")
+        )
         session_profit_pct = self.session_realized_pnl_quote / initial_capital
         session_drawdown_pct = (
             max(Decimal("0"), -self.session_realized_pnl_quote) / initial_capital
         )
 
-        if session_profit_pct >= Decimal("0.05"):
+        if session_profit_pct >= session_tp_pct:
             logger.info(
-                f"[{self.symbol}] Session Take Profit (5%) hit! Banking gains and stopping."
+                f"[{self.symbol}] Session Take Profit ({float(session_tp_pct) * 100:.1f}%) hit! "
+                f"Profit: {float(session_profit_pct) * 100:.2f}%"
             )
-            await self.stop(reason="Quick-Bank: Take Profit Hit")
+            if getattr(self.config, "grid_session_tp_reinvest", True):
+                await self._bank_and_reinvest(reason="Session TP")
+            else:
+                await self.stop(reason="Quick-Bank: Take Profit Hit")
             return
 
-        if session_drawdown_pct >= Decimal("0.07"):
+        if session_drawdown_pct >= session_max_dd_pct:
             logger.warning(
-                f"[{self.symbol}] Session Max Drawdown (7%) hit! Emergency shutdown."
+                f"[{self.symbol}] Session Max Drawdown ({float(session_max_dd_pct) * 100:.1f}%) hit! "
+                f"Drawdown: {float(session_drawdown_pct) * 100:.2f}%"
             )
-            await self.stop(reason="Quick-Bank: Max Drawdown Hit")
+            if getattr(self.config, "grid_session_tp_reinvest", True):
+                await self._bank_and_reinvest(reason="Session Max DD")
+            else:
+                await self.stop(reason="Quick-Bank: Max Drawdown Hit")
             return
 
         # 2. Regime Detection

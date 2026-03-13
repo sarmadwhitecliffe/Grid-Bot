@@ -17,6 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bot_v2.utils.symbol_utils import normalize_to_market_format
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,7 +205,9 @@ class OrderStateManager:
         if raw_value is None:
             return default
 
-        statuses = {item.strip().upper() for item in raw_value.split(",") if item.strip()}
+        statuses = {
+            item.strip().upper() for item in raw_value.split(",") if item.strip()
+        }
         if statuses:
             return statuses
 
@@ -361,11 +365,15 @@ class OrderStateManager:
         return [OrderRecord(**o) for o in self._orders["orders"].values()]
 
     def get_orders_by_symbol(self, symbol: str) -> List[OrderRecord]:
-        """Get all orders for a specific symbol."""
+        """Get all orders for a specific symbol.
+
+        Handles both 'BTC/USDT' and 'BTCUSDT' symbol formats using normalize_to_market_format.
+        """
+        normalized = normalize_to_market_format(symbol)
         return [
             OrderRecord(**o)
             for o in self._orders["orders"].values()
-            if o.get("symbol") == symbol
+            if normalize_to_market_format(o.get("symbol", "")) == normalized
         ]
 
     def get_open_orders(self) -> List[OrderRecord]:
@@ -377,11 +385,16 @@ class OrderStateManager:
         ]
 
     def get_open_orders_by_symbol(self, symbol: str) -> List[OrderRecord]:
-        """Get all open orders for a specific symbol."""
+        """Get all open orders for a specific symbol.
+
+        Handles both 'BTC/USDT' and 'BTCUSDT' symbol formats using normalize_to_market_format.
+        """
+        normalized = normalize_to_market_format(symbol)
         return [
             OrderRecord(**o)
             for o in self._orders["orders"].values()
-            if o.get("symbol") == symbol and str(o.get("status", "")).upper() in ["NEW", "PARTIALLY_FILLED", "OPEN"]
+            if normalize_to_market_format(o.get("symbol", "")) == normalized
+            and str(o.get("status", "")).upper() in ["NEW", "PARTIALLY_FILLED", "OPEN"]
         ]
 
     def get_unverified_orders(self) -> List[OrderRecord]:
@@ -632,21 +645,27 @@ class OrderStateManager:
         archive_file = self.data_dir / "orders_archive.json"
         await asyncio.to_thread(self._append_to_archive, archive_file, to_archive)
 
-    def _append_to_archive(self, archive_file: Path, new_orders: Dict[str, Any]) -> None:
+    def _append_to_archive(
+        self, archive_file: Path, new_orders: Dict[str, Any]
+    ) -> None:
         """Helper to append orders to archive file synchronously."""
         try:
             archive_data = {"orders": {}, "metadata": {"last_archived": None}}
-            
+
             if archive_file.exists():
                 try:
                     with open(archive_file, "r") as f:
                         archive_data = json.load(f)
                 except Exception:
-                    logger.warning("Failed to load archive file, starting fresh archive")
+                    logger.warning(
+                        "Failed to load archive file, starting fresh archive"
+                    )
 
             # Add new orders
             archive_data["orders"].update(new_orders)
-            archive_data["metadata"]["last_archived"] = datetime.now(timezone.utc).isoformat()
+            archive_data["metadata"]["last_archived"] = datetime.now(
+                timezone.utc
+            ).isoformat()
 
             archive_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -662,13 +681,15 @@ class OrderStateManager:
                 json.dump(archive_data, f, indent=2, default=str)
                 temp_path = Path(f.name)
             temp_path.replace(archive_file)
-            
+
         except Exception as e:
             logger.error(f"Error appending to orders_archive.json: {e}", exc_info=True)
 
     def get_total_trades(self) -> int:
         """Get total number of closed trades."""
-        return len([o for o in self._orders["orders"].values() if o.get("status") == "CLOSED"])
+        return len(
+            [o for o in self._orders["orders"].values() if o.get("status") == "CLOSED"]
+        )
 
     def get_stats(self) -> Dict[str, Any]:
         """Get order statistics."""

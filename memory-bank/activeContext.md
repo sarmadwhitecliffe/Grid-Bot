@@ -11,21 +11,49 @@ tags:
   - active-context
 ai_note: "Generated with AI assistance."
 summary: "Current focus, recent changes, and next steps."
-post_date: "2026-02-22"
+post_date: "2026-03-13"
 ---
 
 ## Current Focus
 
-- The bot is completing its **Phase 6** validation sequence. The focus is exclusively on quantitative backtest tuning and final integration checks to prepare for live testnet deployment. We are currently searching for the optimal parameters using config-driven optimization ranges.
+- **Production Hardening (Phase 7)**: Fixing critical bugs discovered during live simulation:
+  - Order recovery on restart
+  - Performance metrics accuracy
+  - Autonomous grid auto-restart after hitting session TP
 
-## Recent Changes
+## Recent Changes (2026-03-13)
 
-- **Test Suite Overhaul**: Addressed several mock-related bugs involving the asynchronous nature of `pytest` and how `ccxt` objects are mocked inside `ExchangeClient` and `FillHandler`. Specifically fixed `TypeError` exceptions surrounding mock `_execute_mock_call` limitations.
-- **Data Parquet Caching**: Wrapped `fetch_historical_data` with Parquet-based caching (`pyarrow`) to avoid long re-fetches from Binance when running repeated optimizations.
-- **Codebase cleanup**: Replaced outdated parameter names like `TIMEFRAME` with `OHLCV_TIMEFRAME` in integration tests and the main execution loop.
+### Bug Fixes
+
+1. **Performance Metrics** (`adaptive_risk_manager.py`):
+   - Was: Used hardcoded `100.0` as starting equity
+   - Now: Uses actual `initial_capital` from config (e.g., 2000)
+   - Impact: `symbol_performance.json` now shows correct equity values
+
+2. **Order Recovery** (`order_state_manager.py`):
+   - Was: Symbol mismatch - orders stored as "BTCUSDT", queried as "BTC/USDT"
+   - Now: Uses `normalize_to_market_format()` for both storage and queries
+   - Impact: 991 orders now properly recovered on restart
+
+3. **Grid Auto-Restart** (`orchestrator.py` + `strategy_config.py`):
+   - New: `grid_auto_restart` config option (default: True)
+   - New: `_maybe_restart_grid()` method with cooldown
+   - Impact: Grid automatically restarts after hitting 5% TP or max DD
+
+### New Config Options
+
+```json
+{
+  "grid_session_tp_reinvest": true,   // Re-invest after TP (default)
+  "grid_session_tp_pct": "0.05",       // 5% TP threshold
+  "grid_session_max_dd_pct": "0.07",   // 7% DD threshold
+  "grid_reinvest_min_interval_seconds": 60,
+  "grid_auto_restart": true             // Auto-restart stopped grids
+}
+```
 
 ## Next Steps
 
-1. **Observe Optimizer**: Await the background completion of `python scripts/optimize_params.py`.
-2. **Apply Parameters**: Paste the winning parameters into `config/optimization_space.yaml` as the new defaults or promote them to runtime settings as needed.
-3. **Smoke Test**: Launch `python main.py` configured with `TESTNET=True` against Binance testnet to confirm that `LONG` and `SHORT` hedge-mode orders successfully populate on the live exchange.
+1. Restart bot and verify grids recover from existing orders
+2. Monitor ADA/USDT which was stuck due to regime detection
+3. Verify auto-restart works after cooldown period
