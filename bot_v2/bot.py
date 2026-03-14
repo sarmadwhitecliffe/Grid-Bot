@@ -369,6 +369,7 @@ class TradingBot:
         self.order_state_prune_interval_sec = int(
             os.getenv("BOTV2_ORDER_STATE_PRUNE_INTERVAL_SECS", "21600")
         )
+        self._start_time = datetime.now(timezone.utc)  # Track uptime
 
         # In-memory caches (performance)
         # ATR cache keyed by (symbol, timeframe) -> {"last_bar_ts": int, "atr": Decimal}
@@ -2911,9 +2912,50 @@ class TradingBot:
             for symbol, pos in self.positions.items()
         }
 
+    def _get_grid_status_summary(self) -> Dict[str, Any]:
+        """Get a summary of all grid orchestrators."""
+        total_grids = len(self.grid_orchestrators)
+        active_grids = 0
+        grid_details = []
+
+        for symbol, orch in self.grid_orchestrators.items():
+            is_active = getattr(orch, "is_active", False)
+            fills = getattr(orch, "session_fill_count", 0)
+            centre = getattr(orch, "centre_price", None)
+
+            if is_active:
+                active_grids += 1
+
+            grid_details.append(
+                {
+                    "symbol": symbol,
+                    "is_active": is_active,
+                    "fills": fills,
+                    "centre_price": centre,
+                }
+            )
+
+        return {"total": total_grids, "active": active_grids, "details": grid_details}
+
+    def _format_uptime(self) -> str:
+        """Format uptime duration."""
+        if not hasattr(self, "_start_time") or not self._start_time:
+            return "N/A"
+
+        now = datetime.now(timezone.utc)
+        delta = now - self._start_time
+
+        hours = int(delta.total_seconds() // 3600)
+        minutes = int((delta.total_seconds() % 3600) // 60)
+
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        else:
+            return f"{minutes}m"
+
     async def get_summary_message(self, hours: int = 24) -> str:
         """
-        Generate daily/custom performance summary on demand.
+        Generate daily/custom performance summary on demand with combined signal + grid trades.
 
         Args:
             hours: Number of hours to look back (default: 24)
@@ -2924,39 +2966,49 @@ class TradingBot:
         try:
             now = datetime.now(timezone.utc)
             summary_period = now - timedelta(hours=hours)
-            recent_trades = (
-                self.trade_history
-            )  # Use in-memory trade history instead of loading from file
 
-            # Filter trades from last N hours
-            # Trade history uses 'timestamp' field (ISO string) for exit time
-            recent_trades_filtered = []
-            for t in recent_trades:
-                if "timestamp" in t:
-                    try:
-                        # Parse ISO timestamp string
-                        if isinstance(t["timestamp"], str):
-                            trade_time = datetime.fromisoformat(
-                                t["timestamp"].replace("Z", "+00:00")
-                            )
-                        elif isinstance(t["timestamp"], datetime):
-                            trade_time = t["timestamp"]
-                        else:
+            # Get signal trades
+            signal_trades = self.trade_history
+
+            # Get grid trades
+            grid_trades = (
+                list(self.grid_trade_history)
+                if hasattr(self, "grid_trade_history")
+                else []
+            )
+
+            # Combine and filter trades from last N hours
+            def filter_trades_by_time(trades, period):
+                filtered = []
+                for t in trades:
+                    if "timestamp" in t:
+                        try:
+                            if isinstance(t["timestamp"], str):
+                                trade_time = datetime.fromisoformat(
+                                    t["timestamp"].replace("Z", "+00:00")
+                                )
+                            elif isinstance(t["timestamp"], datetime):
+                                trade_time = t["timestamp"]
+                            else:
+                                continue
+
+                            if trade_time >= period:
+                                filtered.append(t)
+                        except Exception:
                             continue
+                return filtered
 
-                        if trade_time >= summary_period:
-                            recent_trades_filtered.append(t)
-                    except Exception as e:
-                        logger.warning(f"Error parsing trade timestamp: {e}")
-                        continue
+            recent_signal_trades = filter_trades_by_time(signal_trades, summary_period)
+            recent_grid_trades = filter_trades_by_time(grid_trades, summary_period)
 
-            recent_trades = recent_trades_filtered
+            # All combined trades
+            recent_trades = recent_signal_trades + recent_grid_trades
 
             if not recent_trades:
-                return f"📈 *Performance Summary*: No trades closed in the last {hours} hours."
+                period_desc = f"{hours}h" if hours <= 48 else f"{hours // 24}d"
+                return f"📈 Performance Summary ({period_desc}): No closed trades."
 
-            # Calculate enhanced performance metrics
-            # Convert string/float values to Decimal for calculations
+            # Helper function
             def to_decimal(val):
                 if val is None:
                     return Decimal(0)
@@ -2966,12 +3018,10 @@ class TradingBot:
                     if isinstance(val, str):
                         return Decimal(val)
                     return val
-                except Exception as e:
-                    logger.warning(
-                        f"Error converting value to decimal: {val}, error: {e}"
-                    )
+                except Exception:
                     return Decimal(0)
 
+            # Calculate metrics for all trades
             total_pnl = sum(to_decimal(t.get("pnl_usd", 0)) for t in recent_trades)
             total_r = sum(
                 to_decimal(t.get("realized_r_multiple", 0)) for t in recent_trades
@@ -2980,87 +3030,54 @@ class TradingBot:
                 1 for t in recent_trades if to_decimal(t.get("pnl_usd", 0)) > 0
             )
             loss_count = len(recent_trades) - win_count
-            win_rate = (win_count / len(recent_trades)) * 100 if recent_trades else 0
+            win_rate = (win_count / len(recent_trades) * 100) if recent_trades else 0
 
-            # Calculate additional metrics
-            avg_win = (
-                sum(
+            # Grid vs Signal breakdown
+            grid_trades_count = len(recent_grid_trades)
+            signal_trades_count = len(recent_signal_trades)
+            grid_pnl = sum(to_decimal(t.get("pnl_usd", 0)) for t in recent_grid_trades)
+            signal_pnl = sum(
+                to_decimal(t.get("pnl_usd", 0)) for t in recent_signal_trades
+            )
+
+            # Average metrics
+            avg_win = Decimal(0)
+            avg_loss = Decimal(0)
+            if win_count > 0:
+                wins = [
                     to_decimal(t.get("pnl_usd", 0))
                     for t in recent_trades
                     if to_decimal(t.get("pnl_usd", 0)) > 0
-                )
-                / win_count
-                if win_count > 0
-                else Decimal(0)
-            )
-            avg_loss = (
-                sum(
+                ]
+                avg_win = sum(wins) / len(wins) if wins else Decimal(0)
+            if loss_count > 0:
+                losses = [
                     to_decimal(t.get("pnl_usd", 0))
                     for t in recent_trades
                     if to_decimal(t.get("pnl_usd", 0)) < 0
-                )
-                / loss_count
-                if loss_count > 0
-                else Decimal(0)
-            )
-            profit_factor = (
-                abs(avg_win * win_count / (avg_loss * loss_count))
-                if loss_count > 0 and avg_loss != 0
-                else Decimal("999")
-            )
+                ]
+                avg_loss = sum(losses) / len(losses) if losses else Decimal(0)
 
-            # Analyze trade durations (use time_to_exit_sec from trade history)
+            profit_factor = Decimal("999")
+            if avg_loss != 0:
+                pf = (
+                    (avg_win * win_count) / (abs(avg_loss) * loss_count)
+                    if loss_count > 0
+                    else Decimal("999")
+                )
+                profit_factor = pf if pf > 0 else Decimal("999")
+
+            # Duration analysis
             durations = []
             for t in recent_trades:
                 if "time_to_exit_sec" in t:
                     try:
-                        duration_hours = (
-                            float(t["time_to_exit_sec"]) / 3600
-                        )  # Convert seconds to hours
-                        durations.append(duration_hours)
-                    except Exception as e:
-                        logger.warning(f"Error parsing trade duration: {e}")
+                        durations.append(float(t["time_to_exit_sec"]) / 3600)
+                    except Exception:
                         continue
             avg_duration = sum(durations) / len(durations) if durations else 0
 
-            # Exit reason analysis
-            exit_reasons = {}
-            for t in recent_trades:
-                reason = t.get("exit_reason", "Unknown")
-                if reason not in exit_reasons:
-                    exit_reasons[reason] = {
-                        "count": 0,
-                        "total_r": Decimal(0),
-                        "total_pnl": Decimal(0),
-                    }
-                exit_reasons[reason]["count"] += 1
-                exit_reasons[reason]["total_r"] += to_decimal(
-                    t.get("realized_r_multiple", 0)
-                )
-                exit_reasons[reason]["total_pnl"] += to_decimal(t.get("pnl_usd", 0))
-
-            # Create enhanced reason summary with compact format
-            reason_lines = []
-            for reason, stats in sorted(
-                exit_reasons.items(), key=lambda x: x[1]["total_pnl"], reverse=True
-            ):
-                pnl_emoji = "🟢" if stats["total_pnl"] > 0 else "🔴"
-                reason_lines.append(
-                    f"{pnl_emoji} {reason}: {stats['count']} trades | {self.notifier.format_currency(stats['total_pnl'])} | {self.notifier.format_r_multiple(stats['total_r'])}"
-                )
-            "\n".join(reason_lines)
-
-            # Performance trend indicator
-            if total_pnl > 50:
-                performance_status = "Excellent"
-            elif total_pnl > 0:
-                performance_status = "Profitable"
-            elif total_pnl > -50:
-                performance_status = "Mixed"
-            else:
-                performance_status = "Challenging"
-
-            # Analyze per-symbol performance
+            # Per-symbol performance
             symbol_performance = {}
             for t in recent_trades:
                 symbol = t.get("symbol", "Unknown")
@@ -3070,134 +3087,107 @@ class TradingBot:
                         "wins": 0,
                         "losses": 0,
                         "total_pnl": Decimal(0),
-                        "total_r": Decimal(0),
-                        "win_pnl": Decimal(0),
-                        "loss_pnl": Decimal(0),
                     }
                 perf = symbol_performance[symbol]
                 perf["trades"] += 1
                 pnl = to_decimal(t.get("pnl_usd", 0))
                 perf["total_pnl"] += pnl
-                perf["total_r"] += to_decimal(t.get("realized_r_multiple", 0))
                 if pnl > 0:
                     perf["wins"] += 1
-                    perf["win_pnl"] += pnl
                 else:
                     perf["losses"] += 1
-                    perf["loss_pnl"] += pnl
 
-            # Create per-symbol summary
-            if symbol_performance:
-                symbol_lines = ["📊 Per-Symbol Performance:"]
-                for symbol, perf in sorted(
-                    symbol_performance.items(),
-                    key=lambda x: x[1]["total_pnl"],
-                    reverse=True,
-                ):
-                    win_rate = (
-                        (perf["wins"] / perf["trades"] * 100)
-                        if perf["trades"] > 0
-                        else 0
-                    )
-                    symbol_lines.append(
-                        f"   • {symbol}: {perf['trades']} trades | {self.notifier.format_currency(perf['total_pnl'])} | {win_rate:.1f}% win rate"
-                    )
-                "\n" + "\n".join(symbol_lines) + "\n"
+            # Exit reasons
+            exit_reasons = {}
+            for t in recent_trades:
+                reason = t.get("exit_reason", "Unknown")
+                if reason not in exit_reasons:
+                    exit_reasons[reason] = {"count": 0, "total_pnl": Decimal(0)}
+                exit_reasons[reason]["count"] += 1
+                exit_reasons[reason]["total_pnl"] += to_decimal(t.get("pnl_usd", 0))
 
-            # Create streak analysis
-            streak_type = (
-                "win"
-                if recent_trades and to_decimal(recent_trades[-1].get("pnl_usd", 0)) > 0
-                else "loss"
-            )
-            current_streak = 0
-            for t in reversed(recent_trades):
-                if (streak_type == "win" and to_decimal(t.get("pnl_usd", 0)) > 0) or (
-                    streak_type == "loss" and to_decimal(t.get("pnl_usd", 0)) <= 0
-                ):
-                    current_streak += 1
-                else:
-                    break
+            # Performance status
+            if total_pnl > 50:
+                performance_status = "🔥 Excellent"
+            elif total_pnl > 0:
+                performance_status = "🟢 Profitable"
+            elif total_pnl > -50:
+                performance_status = "🟡 Mixed"
+            else:
+                performance_status = "🔴 Challenging"
 
-            # Time period description
+            # Period description
             if hours == 24:
-                period_desc = "Last 24 hours"
-            elif hours < 24:
-                period_desc = f"Last {hours} hours"
+                period_desc = "Last 24h"
+            elif hours < 48:
+                period_desc = f"Last {hours}h"
             elif hours == 168:
                 period_desc = "Last 7 days"
             else:
-                days = hours // 24
-                period_desc = f"Last {days} days"
+                period_desc = f"Last {hours // 24}d"
 
-            # Calculate percentage return (if we have capital data)
-            try:
-                all_capitals = self.capital_manager.get_all_capitals() or {}
-                total_capital = (
-                    sum(all_capitals.values()) if all_capitals else Decimal("0")
-                )
-                pnl_percentage = (
-                    (total_pnl / total_capital * 100)
-                    if total_capital > 0
-                    else Decimal("0")
-                )
-            except Exception:
-                pnl_percentage = Decimal("0")
-
-            # Fix: Ensure win rate is calculated and formatted correctly
-            win_rate_display = (
-                f"{(win_count / len(recent_trades) * 100):.1f}"
-                if len(recent_trades) > 0
-                else "0.0"
-            )
-            summary_msg = (
-                f"📈 Performance Summary\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 Period: {period_desc}\n"
-                f"🎯 Status: {performance_status}\n\n"
-                f"📊 Trade Statistics\n"
-                f"   • Total Trades: {len(recent_trades)}\n"
-                f"   • Win Rate: {win_rate_display}% ({win_count}W / {loss_count}L)\n"
-                f"   • Avg Duration: {avg_duration:.1f}h\n"
-                f"   • Current Streak: {current_streak} {streak_type}s\n\n"
-                f"💰 Financial Performance\n"
-                f"   • Net PnL: {self.notifier.format_currency(total_pnl)} ({pnl_percentage:+.2f}%)\n"
-                f"   • Net R-Multiple: {self.notifier.format_r_multiple(total_r)}\n"
-                f"   • Avg Win: {self.notifier.format_currency(avg_win)}\n"
-                f"   • Avg Loss: {self.notifier.format_currency(avg_loss)}\n"
-                f"   • Profit Factor: {profit_factor:.2f}\n\n"
-                f"📊 Per-Symbol Performance:\n"
+            # Get current capital and calculate return
+            all_capitals = self.capital_manager.get_all_capitals() or {}
+            total_capital = sum(all_capitals.values())
+            pnl_percentage = (
+                (total_pnl / total_capital * 100) if total_capital > 0 else Decimal("0")
             )
 
-            # Add per-symbol performance
-            if symbol_performance:
+            # Build message
+            lines = [
+                "📈 PERFORMANCE SUMMARY",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"📅 {period_desc}",
+                f"🎯 Status: {performance_status}",
+                "",
+                "📊 Trade Overview",
+                f"   • Total: {len(recent_trades)} trades ({signal_trades_count} signal, {grid_trades_count} grid)",
+                f"   • Win Rate: {win_rate:.1f}% ({win_count}W / {loss_count}L)",
+                f"   • Avg Duration: {avg_duration:.1f}h",
+                "",
+                "💰 Financial",
+                f"   • Net P&L: {self.notifier.format_currency(total_pnl)} ({pnl_percentage:+.2f}%)",
+                f"   • Signal P&L: {self.notifier.format_currency(signal_pnl)}",
+                f"   • Grid P&L: {self.notifier.format_currency(grid_pnl)}",
+                f"   • Net R: {self.notifier.format_r_multiple(total_r)}",
+                f"   • Avg Win: {self.notifier.format_currency(avg_win)} | Avg Loss: {self.notifier.format_currency(avg_loss)}",
+                f"   • Profit Factor: {profit_factor:.2f}",
+            ]
+
+            # Add per-symbol if we have multiple symbols
+            if len(symbol_performance) > 1:
+                lines.append("")
+                lines.append("📊 By Symbol")
                 for symbol, perf in sorted(
                     symbol_performance.items(),
                     key=lambda x: x[1]["total_pnl"],
                     reverse=True,
                 ):
-                    win_rate_symbol = (
+                    wr = (
                         (perf["wins"] / perf["trades"] * 100)
                         if perf["trades"] > 0
                         else 0
                     )
-                    summary_msg += f"   • {symbol}: {perf['trades']} trades | {self.notifier.format_currency(perf['total_pnl'])} | {win_rate_symbol:.1f}% win rate\n"
+                    lines.append(
+                        f"   • {symbol}: {perf['trades']} trades | {self.notifier.format_currency(perf['total_pnl'])} | {wr:.0f}% WR"
+                    )
 
-            summary_msg += "\n🚪 Exit Analysis\n"
+            # Add top exit reasons
+            if exit_reasons:
+                lines.append("")
+                lines.append("🚪 Top Exit Reasons")
+                for reason, stats in sorted(
+                    exit_reasons.items(), key=lambda x: x[1]["total_pnl"], reverse=True
+                )[:4]:
+                    emoji = "🟢" if stats["total_pnl"] > 0 else "🔴"
+                    lines.append(
+                        f"   • {reason}: {stats['count']} | {emoji} {self.notifier.format_currency(stats['total_pnl'])}"
+                    )
 
-            # Add exit analysis
-            for reason, stats in sorted(
-                exit_reasons.items(), key=lambda x: x[1]["total_pnl"], reverse=True
-            ):
-                pnl_emoji = "🟢" if stats["total_pnl"] > 0 else "🔴"
-                r_value = f"{stats['total_r']:+.2f}R"
-                summary_msg += f"   • {reason}: {stats['count']} trades | {self.notifier.format_currency(stats['total_pnl'])} | {pnl_emoji} {r_value}\n"
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("📈 Keep systematic trading!")
 
-            summary_msg += (
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n📈 Keep up the systematic trading!"
-            )
-
-            return summary_msg
+            return "\n".join(lines)
 
         except Exception as e:
             logger.error(f"Error generating performance summary: {e}", exc_info=True)
@@ -3222,27 +3212,67 @@ class TradingBot:
         # Header
         has_live = any(cfg.mode == "live" for cfg in self.strategy_configs.values())
         mode = "🚀 LIVE" if has_live else "⚙️ SIMULATION"
+        uptime = self._format_uptime()
+
+        # Get capital info
+        all_capitals = self.capital_manager.get_all_capitals() or {}
+        total_capital = sum(all_capitals.values())
+
+        # Get risk status
+        risk_summary = self.global_risk_manager.get_risk_summary()
+        tier_status = self.risk_manager.get_all_tiers_status()
+
+        # Get grid status
+        grid_status = self._get_grid_status_summary()
+
+        # Get signal queue depth
+        signal_queue_depth = self.signal_queue.qsize()
+
         lines = [
             "═══════════════════════════",
             f"  BOT STATUS - {mode}",
             "═══════════════════════════",
             "",
+            f"⏱️ Uptime: {uptime}",
+            f"📥 Signal Queue: {signal_queue_depth} pending",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "💰 CAPITAL & RISK",
+            f"   Total: ${total_capital:.0f}",
         ]
+
+        # Add tier status
+        if tier_status:
+            lines.append("   ⚡ Tiers:")
+            for symbol, info in tier_status.items():
+                kill = " ❌" if info.get("kill_switch_active") else ""
+                lines.append(
+                    f"      {symbol}: {info['tier']} ({info['allocation_pct']}%, {info['leverage']}x){kill}"
+                )
+
+        # Add risk summary
+        kill_status = "❌ TRIGGERED" if risk_summary["is_halted"] else "✅ Clear"
+        lines.append(f"   🛑 Kill Switch: {kill_status}")
+        if risk_summary["is_halted"]:
+            lines.append(f"      Reason: {risk_summary['halt_reason']}")
+        lines.append(
+            f"   📉 Drawdown: {risk_summary['current_drawdown_pct']:.1f}% / {risk_summary['max_drawdown_allowed_pct']:.0f}%"
+        )
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(
+            f"📈 POSITIONS: {len(positions)} | 🔲 GRIDS: {grid_status['active']}/{grid_status['total']}"
+        )
+        lines.append("")
 
         # Active positions
         if positions:
-            lines.append(f"📊 Active Positions: {len(positions)}")
-            lines.append("")
-
-            # Fetch current prices sequentially (keep simple and robust)
             for pos in positions:
                 try:
                     current_price = await self._get_current_price(pos.symbol_id)
                     if current_price is None or current_price == Decimal("0"):
-                        # Fallback to entry_price when price unavailable
                         current_price = pos.entry_price
 
-                    # Use current_amount for unrealized PnL calculation
                     amt = getattr(
                         pos,
                         "current_amount",
@@ -3258,7 +3288,6 @@ class TradingBot:
                             if pos.entry_price and pos.entry_price > 0
                             else Decimal("0")
                         )
-                        side_label = "long"
                         side_emoji = "📈"
                     else:
                         pnl = (pos.entry_price - current_price) * amt
@@ -3267,32 +3296,56 @@ class TradingBot:
                             if pos.entry_price and pos.entry_price > 0
                             else Decimal("0")
                         )
-                        side_label = "short"
                         side_emoji = "📉"
 
                     pnl_display = self.notifier.format_currency(Decimal(pnl))
-                    pct_display = f"{Decimal(pct):+.2f}%"
-                    entry_display = (
-                        f"{pos.entry_price:.4f}"
-                        if isinstance(pos.entry_price, Decimal)
-                        else f"{pos.entry_price}"
-                    )
+                    pct_display = f"{pct:+.2f}%"
 
-                    # Include both a nicely formatted block and keep the plain
-                    # textual tokens that older tests and integrations expect
+                    # Duration
+                    now = datetime.now(timezone.utc)
+                    duration = self.notifier.format_duration(pos.entry_time, now)
+
+                    # R multiple
+                    r_val = getattr(pos, "current_r", Decimal("0"))
+                    r_display = self.notifier.format_r_multiple(r_val)
+
                     lines.append(
-                        f"  {side_emoji} {pos.symbol_id} {pos.side.value} | {side_label.upper()}\n"
-                        f"    Entry: ${entry_display}  •  Price: ${current_price:.4f}\n"
-                        f"    Amount: {amt}  •  PnL: {pnl_display} ({pct_display})"
+                        f"   {side_emoji} {pos.symbol_id} {pos.side.value.upper()}"
                     )
+                    lines.append(
+                        f"      Entry: ${pos.entry_price:.2f} | Now: ${current_price:.2f}"
+                    )
+                    lines.append(
+                        f"      P&L: {pnl_display} ({pct_display}) | R: {r_display}"
+                    )
+                    lines.append(f"      Duration: {duration}")
+                    lines.append("")
                 except Exception as e:
                     logger.error(f"Error computing status for {pos.symbol_id}: {e}")
-                    # Show minimal info on error
-                    lines.append(
-                        f"  {pos.symbol_id} {pos.side.value} | Entry: ${pos.entry_price:.2f} | PnL: N/A"
-                    )
+                    lines.append(f"   ⚠️ {pos.symbol_id}: Error - {e}")
+                    lines.append("")
         else:
-            lines.append("📊 Active Positions: None")
+            lines.append("   No active positions")
+
+        # Add grid status if any
+        if grid_status["total"] > 0:
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("🔲 ACTIVE GRIDS")
+            for detail in grid_status["details"]:
+                if detail["is_active"]:
+                    centre_str = (
+                        f"${detail['centre_price']:.0f}"
+                        if detail["centre_price"]
+                        else "N/A"
+                    )
+                    lines.append(
+                        f"   {detail['symbol']}: Centre {centre_str} | Fills: {detail['fills']}"
+                    )
+
+            # Show inactive grids count
+            inactive = grid_status["total"] - grid_status["active"]
+            if inactive > 0:
+                lines.append(f"   (Inactive: {inactive})")
 
         lines.append("═══════════════════════════")
 
@@ -3430,24 +3483,31 @@ class TradingBot:
 
     async def _send_heartbeat(self) -> None:
         """
-        Send hourly heartbeat with position status and daily summary.
-        EXACT implementation from bot_v1 lines 4100-4320.
+        Send hourly heartbeat with position status, grid status, and risk metrics.
         """
         try:
             logger.debug("Sending heartbeat...")
             active_count = len(self.positions)
             now = datetime.now(timezone.utc)
             now_str = now.strftime("%Y-%m-%d %H:%M UTC")
+            uptime = self._format_uptime()
 
-            # Log cache statistics (Phase 2: Optimization monitoring)
-            if self.market_data_cache:
-                cache_stats = self.market_data_cache.get_stats()
-                logger.info(
-                    f"📦 Cache Stats - Hit Rate: {cache_stats['hit_rate']:.1f}%, "
-                    f"Hits: {cache_stats['hits']}, Misses: {cache_stats['misses']}, "
-                    f"Size: {cache_stats['size']}/{cache_stats['max_size']}, "
-                    f"Evictions: {cache_stats['evictions']}"
-                )
+            # Get grid status
+            grid_status = self._get_grid_status_summary()
+
+            # Get risk status
+            risk_summary = self.global_risk_manager.get_risk_summary()
+            tier_status = self.risk_manager.get_all_tiers_status()
+
+            # Exchange connection status
+            exchange_status = (
+                "✅ Connected"
+                if self.live_exchange
+                else "⚠️ Live exchange not configured"
+            )
+
+            # Signal queue
+            signal_queue_depth = self.signal_queue.qsize()
 
             # Calculate system metrics
             capitals = [
@@ -3457,20 +3517,32 @@ class TradingBot:
             total_capital = sum(capitals)
             total_unrealized = Decimal("0")
 
-            # --- Enhanced Heartbeat for Active Positions ---
+            # --- Heartbeat with no positions ---
             if active_count == 0:
+                tier_summary = (
+                    ", ".join([f"{s}:{t['tier']}" for s, t in tier_status.items()])
+                    if tier_status
+                    else "N/A"
+                )
+                dd_pct = risk_summary["current_drawdown_pct"]
+
                 status_msg = (
                     f"💓 SYSTEM STATUS\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"⏰ {now_str}\n"
+                    f"⏱️ Uptime: {uptime}\n\n"
                     f"💰 Capital: ${total_capital:.0f}\n"
-                    f"📊 Positions: 0\n"
-                    f"🎯 Status: Standing by\n\n"
+                    f"📊 Positions: 0 | 🔲 Grids: {grid_status['active']}/{grid_status['total']}\n"
+                    f"📥 Signals: {signal_queue_depth} queued\n\n"
+                    f"🤖 Exchange: {exchange_status}\n\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🤖 Bot running normally"
+                    f"⚡ Tiers: {tier_summary}\n"
+                    f"🛑 Kill Switch: {'❌ TRIGGERED' if risk_summary['is_halted'] else '✅ Clear'}\n"
+                    f"📉 Drawdown: {dd_pct:.1f}% / {risk_summary['max_drawdown_allowed_pct']:.0f}%"
                 )
                 await self.notifier.send(status_msg)
             else:
+                # --- Heartbeat with active positions ---
                 position_lines = []
 
                 for pos in list(self.positions.values()):
@@ -3503,11 +3575,15 @@ class TradingBot:
                         )
                         side_icon = "LONG" if pos.side == PositionSide.LONG else "SHORT"
 
+                        # R multiple
+                        r_val = getattr(pos, "current_r", Decimal("0"))
+                        r_display = self.notifier.format_r_multiple(r_val)
+
                         symbol_text = self.notifier.escape_markdown(pos.symbol_id)
 
                         position_lines.append(
                             f"{pnl_indicator} {symbol_text} {side_icon}\n"
-                            f"   P&L: ${pnl_unrealized:.2f} | Duration: {duration}"
+                            f"   P&L: ${pnl_unrealized:.2f} | {duration} | R: {r_display}"
                         )
                     except Exception as e:
                         logger.error(
@@ -3521,19 +3597,32 @@ class TradingBot:
                 )
                 mode_text = "LIVE" if has_live else "SIMULATION"
 
+                tier_summary = (
+                    ", ".join([f"{s}:{t['tier']}" for s, t in tier_status.items()])
+                    if tier_status
+                    else "N/A"
+                )
+                dd_pct = risk_summary["current_drawdown_pct"]
+
                 overview = (
                     f"💓 SYSTEM STATUS\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"⏰ {now_str}\n"
+                    f"⏱️ Uptime: {uptime}\n\n"
                     f"💰 Capital: ${total_capital:.0f} | Unrealized: ${total_unrealized:.2f}\n"
-                    f"📊 Positions: {active_count} ({mode_text})\n\n"
-                    + "\n".join(position_lines)
-                    + "\n\n"
+                    f"📊 Positions: {active_count} ({mode_text}) | 🔲 Grids: {grid_status['active']}/{grid_status['total']}\n"
+                    f"📥 Signals: {signal_queue_depth}\n\n"
+                    f"🤖 Exchange: {exchange_status}\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(position_lines) + "\n\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "🤖 Bot running normally"
+                    f"⚡ Tiers: {tier_summary}\n"
+                    f"🛑 Kill Switch: {'❌ TRIGGERED' if risk_summary['is_halted'] else '✅ Clear'}\n"
+                    f"📉 Drawdown: {dd_pct:.1f}% / {risk_summary['max_drawdown_allowed_pct']:.0f}%"
                 )
 
-                await self.notifier.send(overview)  # --- Daily Performance Summary ---
+                await self.notifier.send(overview)
+
+            # --- Daily Performance Summary ---
             if (
                 now.hour == 0
                 and now.minute < 5

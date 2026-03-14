@@ -220,3 +220,16 @@ class AdaptiveRiskIntegration:
             "average_profit_factor": avg_pf,
             "risk_manager_active": True,
         }
+
+    def get_all_tiers_status(self) -> Dict[str, Dict[str, Any]]:
+        """Get tier status for all configured symbols."""
+        tiers_status = {}
+        for symbol in self.capital_manager._capitals.keys():
+            tier_info = self.get_tier_info(symbol)
+            tiers_status[symbol] = {
+                "tier": tier_info.get("tier", "UNKNOWN"),
+                "allocation_pct": tier_info.get("capital_allocation", 0),
+                "leverage": tier_info.get("leverage_multiplier", 1),
+                "kill_switch_active": tier_info.get("kill_switch_active", False),
+            }
+        return tiers_status
