@@ -436,27 +436,27 @@ async def run_optimizer() -> None:
 
         best_result = ranked_test[0]
         best = best_result["params"]
-        
-        # FINAL STEP: Run a full-period backtest for the best params to ensure reported metrics 
+
+        # FINAL STEP: Run a full-period backtest for the best params to ensure reported metrics
         # match a standalone full-period backtest.
         logger.info("Running final full-period validation for best params...")
         full_df = await fetch_historical_data(
             exchange_id="binance",
             symbol=symbol,
-            timeframe=timeframes[0], # Using first timeframe for summary
+            timeframe=timeframes[0],  # Using first timeframe for summary
             days=lookback_days,
         )
         full_metrics = evaluate_params(({**best, "SYMBOL": symbol}, full_df))
-        
+
         # Log the params being validated regardless of pass/fail
         logger.info(f"Full-period validation params for {symbol}: {best}")
 
         # Guardrail check on full period results
         passed_guardrails = (
-            full_metrics["win_rate"] >= min_win_rate and
-            full_metrics["profit_factor"] >= min_profit_factor and
-            full_metrics["max_drawdown"] <= max_drawdown and
-            full_metrics["num_trades"] >= min_trades
+            full_metrics["win_rate"] >= min_win_rate
+            and full_metrics["profit_factor"] >= min_profit_factor
+            and full_metrics["max_drawdown"] <= max_drawdown
+            and full_metrics["num_trades"] >= min_trades
         )
 
         if passed_guardrails:
@@ -479,7 +479,7 @@ async def run_optimizer() -> None:
                 full_metrics["profit_factor"],
                 full_metrics["win_rate"] * 100,
                 full_metrics["max_drawdown"] * 100,
-                float(full_metrics["num_trades"])
+                float(full_metrics["num_trades"]),
             )
 
     # Load existing config to merge winners
@@ -493,7 +493,16 @@ async def run_optimizer() -> None:
         final_output = {}
 
     # Update with new winners only (keep existing ones if they weren't in this run or didn't pass)
+    # Only save symbols with positive net profit
     for symbol, data in output.items():
+        if data["metrics"]["net_profit"] <= 0:
+            logger.info(
+                "Skipping %s - negative net profit: %.2f",
+                symbol,
+                data["metrics"]["net_profit"],
+            )
+            continue
+
         # Ensure standard fields are included for the bot
         params = data["best_params"]
         final_output[symbol] = {
@@ -513,25 +522,31 @@ async def run_optimizer() -> None:
             "grid_bb_width_threshold": str(params.get("bb_width_threshold", "0.04")),
             "grid_max_open_orders": int(params.get("MAX_OPEN_ORDERS", 100)),
             "cost_floor_multiplier": "2.0",
-            "slippage_pct": "0.1"
+            "slippage_pct": "0.1",
         }
 
     with open(OUTPUT_PATH, "w") as f:
         json.dump(final_output, f, indent=4)
 
     # Generate Summary Report
-    summary_path = PROJECT_ROOT / "data" / "backtest_results" / "optimization_summary.md"
+    summary_path = (
+        PROJECT_ROOT / "data" / "backtest_results" / "optimization_summary.md"
+    )
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     with open(summary_path, "w") as f:
         f.write("# Optimization Summary Report\n\n")
         f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"**Criteria:** PF >= {min_profit_factor}, WR >= {min_win_rate}, DD <= {max_drawdown}\n\n")
+        f.write(
+            f"**Criteria:** PF >= {min_profit_factor}, WR >= {min_win_rate}, DD <= {max_drawdown}\n\n"
+        )
         f.write("| Symbol | PF | WinRate | Net Profit | MaxDD | Trades |\n")
         f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
         for symbol, data in output.items():
             m = data["metrics"]
-            f.write(f"| {symbol} | {m['profit_factor']:.2f} | {m['win_rate']*100:.1f}% | {m['net_profit']:.2f} | {m['max_drawdown']*100:.2f}% | {m['num_trades']} |\n")
+            f.write(
+                f"| {symbol} | {m['profit_factor']:.2f} | {m['win_rate'] * 100:.1f}% | {m['net_profit']:.2f} | {m['max_drawdown'] * 100:.2f}% | {m['num_trades']} |\n"
+            )
 
     logger.info("Optimization task complete. Summary report at %s", summary_path)
 

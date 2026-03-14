@@ -1,17 +1,13 @@
 # --- Balanced Refinement Batch (Targeting PF 1.8) ---
 SYMBOL:
+  - BTC/USDT
+  - ETH/USDT
+  - LINK/USDT
+  - BCH/USDT
   - SOL/USDT
   - ADA/USDT
-  - DOGE/USDT
-  - AVAX/USDT
-  - TRX/USDT
-  - DOT/USDT
-  - MATIC/USDT
   - NEAR/USDT
-  - ATOM/USDT
-  - SUI/USDT
   - APT/USDT
-  - ARB/USDT
   - OP/USDT
 
 # --- Search Settings ---
@@ -23,12 +19,12 @@ TELEGRAM_BOT_TOKEN: ""
 TELEGRAM_CHAT_ID: ""
 TIMEFRAMES:
   - 15m
-LOOKBACK_DAYS: 30
+LOOKBACK_DAYS: 180
 MIN_WIN_RATE: 0.55
-MIN_PROFIT_FACTOR: 1.8  # Balanced Requirement
-MIN_TRADES: 40
-MAX_DRAWDOWN: 0.07
-TOP_N: 3
+MIN_PROFIT_FACTOR: 1.0  # Balanced Requirement
+MIN_TRADES: 10
+MAX_DRAWDOWN: 0.075
+TOP_N: 5
 
 # --- Strategy Defaults ---
 MARKET_TYPE: futures
@@ -39,7 +35,7 @@ GRID_SPACING_ABS: 50.0
 ORDER_SIZE_QUOTE: 100.0
 LOWER_BOUND: null
 UPPER_BOUND: null
-TOTAL_CAPITAL: 2000.0
+TOTAL_CAPITAL: 100.0
 RESERVE_CAPITAL_PCT: 0.1
 MAX_OPEN_ORDERS: 100
 STOP_LOSS_PCT: 0.03
@@ -49,35 +45,32 @@ FUNDING_INTERVAL_HOURS: 8
 POLL_INTERVAL_SEC: 10
 OHLCV_TIMEFRAME: 15m
 OHLCV_LIMIT: 1500
-BACKTEST_INITIAL_CAPITAL: 2000.0
+BACKTEST_INITIAL_CAPITAL: 100.0
 
 # --- THE DEEP SEARCH SPACE ---
 GRID_SPACING_PCT:
-  - 0.005
-  - 0.007
-  - 0.009
-  - 0.012
-  - 0.015
-  - 0.020
+  - 0.001
+  - 0.0015
+  - 0.002
+  - 0.003
+  - 0.004
 
 ADX_THRESHOLD:
-  - 25
-  - 30
-  - 35
   - 40
+  - 50
+  - 60
 
 bb_width_threshold:
+  - 0.03
   - 0.04
+  - 0.05
   - 0.06
-  - 0.08
-  - 0.10
-  - 0.15
 
 NUM_GRIDS:
-  - 20
   - 35
   - 50
   - 70
+  - 100
 
 RECENTRE_TRIGGER:
   - 2
@@ -85,6 +78,7 @@ RECENTRE_TRIGGER:
   - 5
 
 LEVERAGE:
-  - 1
-  - 2
   - 3
+  - 5
+  - 7
+  - 10

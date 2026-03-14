@@ -24,6 +24,8 @@ from src.strategy.regime_detector import RegimeDetector, MarketRegime
 
 logger = logging.getLogger(__name__)
 
+MAKER_FEE = Decimal("0.0002")  # 0.02% Binance Futures maker fee (limit orders)
+
 
 class GridOrchestrator:
     """
@@ -102,12 +104,25 @@ class GridOrchestrator:
         closed_trades: List[Dict[str, Any]] = []
         epsilon = Decimal("0.00000001")
 
+        def calculate_fees(
+            entry_p: Decimal, exit_p: Decimal, qty: Decimal
+        ) -> tuple[Decimal, Decimal, Decimal]:
+            """Calculate entry fee, exit fee, and total fees."""
+            entry_fee = entry_p * qty * MAKER_FEE
+            exit_fee = exit_p * qty * MAKER_FEE
+            total_fees = entry_fee + exit_fee
+            return entry_fee, exit_fee, total_fees
+
         if side == TradeSide.BUY:
             # Buy fill can close prior short inventory.
             while remaining > epsilon and self._open_short_lots:
                 lot = self._open_short_lots[0]
                 matched = min(remaining, lot["amount"])
-                pnl = (lot["entry_price"] - fill_price) * matched
+                gross_pnl = (lot["entry_price"] - fill_price) * matched
+                entry_fee, exit_fee, total_fees = calculate_fees(
+                    lot["entry_price"], fill_price, matched
+                )
+                net_pnl = gross_pnl - total_fees
                 closed_trades.append(
                     {
                         "timestamp": now.isoformat(),
@@ -117,7 +132,11 @@ class GridOrchestrator:
                         "entry_price": str(lot["entry_price"]),
                         "exit_price": str(fill_price),
                         "quantity": str(matched),
-                        "pnl_usd": str(pnl),
+                        "pnl_usd": str(net_pnl),
+                        "gross_pnl_usd": str(gross_pnl),
+                        "entry_fee_usd": str(entry_fee),
+                        "exit_fee_usd": str(exit_fee),
+                        "total_fees_usd": str(total_fees),
                         "entry_time": lot["entry_time"],
                         "exit_time": now.isoformat(),
                         "duration_sec": (
@@ -147,7 +166,11 @@ class GridOrchestrator:
             while remaining > epsilon and self._open_long_lots:
                 lot = self._open_long_lots[0]
                 matched = min(remaining, lot["amount"])
-                pnl = (fill_price - lot["entry_price"]) * matched
+                gross_pnl = (fill_price - lot["entry_price"]) * matched
+                entry_fee, exit_fee, total_fees = calculate_fees(
+                    lot["entry_price"], fill_price, matched
+                )
+                net_pnl = gross_pnl - total_fees
                 closed_trades.append(
                     {
                         "timestamp": now.isoformat(),
@@ -157,7 +180,11 @@ class GridOrchestrator:
                         "entry_price": str(lot["entry_price"]),
                         "exit_price": str(fill_price),
                         "quantity": str(matched),
-                        "pnl_usd": str(pnl),
+                        "pnl_usd": str(net_pnl),
+                        "gross_pnl_usd": str(gross_pnl),
+                        "entry_fee_usd": str(entry_fee),
+                        "exit_fee_usd": str(exit_fee),
+                        "total_fees_usd": str(total_fees),
                         "entry_time": lot["entry_time"],
                         "exit_time": now.isoformat(),
                         "duration_sec": (
@@ -261,13 +288,24 @@ class GridOrchestrator:
         tier_info = self.risk_manager.get_tier_info(self.symbol)
         allocation_pct = Decimal(str(tier_info.get("capital_allocation", 1.0)))
 
-        leverage = Decimal(str(tier_info.get("max_leverage", 1)))
+        # New leverage calculation: strategy config leverage × tier multiplier
+        strategy_leverage = float(getattr(self.config, "leverage", 5))
+        leverage_multiplier = tier_info.get("leverage_multiplier", 1.0)
+        max_leverage_cap = tier_info.get("max_leverage_cap", 20)
+
+        # Calculate leverage: strategy × multiplier, capped
+        calculated_leverage = strategy_leverage * leverage_multiplier
+        leverage = min(int(round(calculated_leverage)), max_leverage_cap)
+        leverage = max(1, leverage)  # Minimum 1x
+        leverage = Decimal(leverage)
+
+        # Check for explicit grid_leverage override in config
         grid_leverage = getattr(self.config, "grid_leverage", None)
         if grid_leverage is not None:
             try:
                 leverage = Decimal(str(grid_leverage))
             except Exception:
-                pass  # Keep default leverage if conversion fails
+                pass  # Keep calculated leverage if conversion fails
 
         allocated_margin = capital * allocation_pct
 
@@ -297,7 +335,8 @@ class GridOrchestrator:
                 f"[{self.symbol}] Grid levels reduced from {config_up}+{config_down} to "
                 f"{actual_up}+{actual_down} due to capital constraints. "
                 f"Capital: ${capital:.2f}, Allocation: {allocation_pct * 100:.0f}%, "
-                f"Margin available: ${allocated_margin:.2f}, Max levels: {max_levels}"
+                f"Margin available: ${allocated_margin:.2f}, Max levels: {max_levels}. "
+                f"Leverage: {strategy_leverage}x (config) × {leverage_multiplier}x (tier) = {leverage}x"
             )
             levels_up, levels_down = actual_up, actual_down
         else:
@@ -840,11 +879,12 @@ class GridOrchestrator:
         self.session_fill_count += 1
 
         notional = fill_price * amount
+        fill_fee = notional * MAKER_FEE  # Fee for this fill
         if side == TradeSide.SELL:
-            self.session_realized_pnl_quote += notional
+            self.session_realized_pnl_quote += notional - fill_fee
             self.session_sell_qty += amount
         else:
-            self.session_realized_pnl_quote -= notional
+            self.session_realized_pnl_quote -= notional - fill_fee
             self.session_buy_qty += amount
 
         # Pair this fill against opposite inventory to produce closed grid trades.

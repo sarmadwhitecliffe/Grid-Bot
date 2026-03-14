@@ -30,7 +30,7 @@ async def test_local_sim_unchanged():
     print("=" * 60)
 
     # Create simulated exchange and order manager
-    sim_exchange = SimulatedExchange(fee=Decimal("0.0004"))
+    sim_exchange = SimulatedExchange(fee=Decimal("0.0002"))  # 0.02% Binance maker fee
     await sim_exchange.setup()
 
     order_manager = OrderManager(sim_exchange)
@@ -64,11 +64,11 @@ async def test_local_sim_unchanged():
                 config=config,
                 current_price=Decimal("50000.0"),  # $50k notional (exceeds $10 limit)
             )
-            print(f"  ✓ Order {i+1} placed successfully (notional: $50,000)")
+            print(f"  ✓ Order {i + 1} placed successfully (notional: $50,000)")
             print(f"    - Order ID: {order.get('id')}")
             print(f"    - Status: {order.get('status')}")
         except Exception as e:
-            print(f"  ✗ Order {i+1} FAILED: {e}")
+            print(f"  ✗ Order {i + 1} FAILED: {e}")
             print("  ERROR: Safety checks should NOT apply in local_sim!")
             return False
 

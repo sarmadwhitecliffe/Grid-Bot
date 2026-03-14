@@ -86,7 +86,7 @@ class SimulatedExchange(ExchangeInterface):
         Initialize simulated exchange.
 
         Args:
-            fee: Trading fee as a decimal (e.g., 0.0004 for 0.04%)
+            fee: Trading fee as a decimal (e.g., 0.0002 for 0.02% Binance maker fee)
             cache: Optional MarketDataCache instance (created if None)
             order_state_manager: Unified state manager
         """
@@ -108,7 +108,11 @@ class SimulatedExchange(ExchangeInterface):
             self.cache = None
             logger.info("Market data cache disabled")
 
-        market_type = settings.MARKET_TYPE.rstrip('s') if settings.MARKET_TYPE.endswith('s') else settings.MARKET_TYPE
+        market_type = (
+            settings.MARKET_TYPE.rstrip("s")
+            if settings.MARKET_TYPE.endswith("s")
+            else settings.MARKET_TYPE
+        )
         self.public_exchange = ccxt_async.binance(
             {
                 "options": {"defaultType": market_type},
@@ -325,19 +329,23 @@ class SimulatedExchange(ExchangeInterface):
         """
         if not self.order_state_manager:
             return []
-            
+
         filled_ids = []
         # Use candle range when available so limit orders fill on intrabar touches.
         # Fallback to point-in-time price for backward compatibility.
         trigger_high = candle_high if candle_high is not None else current_price
         trigger_low = candle_low if candle_low is not None else current_price
         open_sim_records = [
-            r for r in self.order_state_manager.get_open_orders()
-            if r.mode == "local_sim" and r.symbol.replace("/", "") == market_id.replace("/", "")
+            r
+            for r in self.order_state_manager.get_open_orders()
+            if r.mode == "local_sim"
+            and r.symbol.replace("/", "") == market_id.replace("/", "")
         ]
-        
+
         for record in open_sim_records:
-            order_price = Decimal(str(record.avg_price or record.raw_response.get("price", "0")))
+            order_price = Decimal(
+                str(record.avg_price or record.raw_response.get("price", "0"))
+            )
             side = record.side.lower()
 
             should_fill = False

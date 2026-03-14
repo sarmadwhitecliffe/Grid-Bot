@@ -42,9 +42,9 @@ def test_safety_caps_config():
 
     config = StrategyConfig.from_dict("TEST/USDT", config_data)
 
-    assert config.max_notional_per_order == Decimal(
-        "10.0"
-    ), "max_notional_per_order not loaded"
+    assert config.max_notional_per_order == Decimal("10.0"), (
+        "max_notional_per_order not loaded"
+    )
     assert config.daily_max_trades == 5, "daily_max_trades not loaded"
     assert config.daily_max_notional == Decimal("50.0"), "daily_max_notional not loaded"
     assert not config.dry_run, "dry_run not loaded"
@@ -114,14 +114,16 @@ async def test_safety_checks():
     config = StrategyConfig.from_dict("TEST/USDT", config_data)
 
     # Create order manager
-    exchange = SimulatedExchange(fee=Decimal("0.0004"))
+    exchange = SimulatedExchange(fee=Decimal("0.0002"))  # 0.02% Binance maker fee
     await exchange.setup()
     manager = OrderManager(exchange, data_dir=Path("test_data_temp"))
 
     # Test 1: Order within limits (should pass)
     try:
         passes, msg = manager._check_safety_limits(
-            "TEST/USDT", Decimal("8.0"), config  # Below 10.0 limit
+            "TEST/USDT",
+            Decimal("8.0"),
+            config,  # Below 10.0 limit
         )
         assert passes, f"Should pass but got: {msg}"
         print("✅ Order within limits passed")
@@ -130,7 +132,9 @@ async def test_safety_checks():
 
     # Test 2: Order exceeds per-order limit (should fail)
     passes, msg = manager._check_safety_limits(
-        "TEST/USDT", Decimal("15.0"), config  # Above 10.0 limit
+        "TEST/USDT",
+        Decimal("15.0"),
+        config,  # Above 10.0 limit
     )
     assert not passes, "Should fail but passed"
     assert "notional cap exceeded" in msg.lower()
@@ -156,7 +160,7 @@ async def test_dry_run_order():
     }
     config = StrategyConfig.from_dict("TEST/USDT", config_data)
 
-    exchange = SimulatedExchange(fee=Decimal("0.0004"))
+    exchange = SimulatedExchange(fee=Decimal("0.0002"))  # 0.02% Binance maker fee
     await exchange.setup()
     manager = OrderManager(exchange, data_dir=Path("test_data_temp"))
 
@@ -169,9 +173,9 @@ async def test_dry_run_order():
             current_price=Decimal("50000"),
         )
 
-        assert (
-            order["status"] == "DRY_RUN"
-        ), f"Expected DRY_RUN status, got {order['status']}"
+        assert order["status"] == "DRY_RUN", (
+            f"Expected DRY_RUN status, got {order['status']}"
+        )
         assert "_verification_status" in order
         print("✅ Dry-run order created (not executed)")
         print(f"   - Order ID: {order['id']}")
@@ -192,7 +196,7 @@ async def test_live_mode_kill_switch():
     config_data = {"mode": "live", "max_notional_per_order": "100.0", "dry_run": False}
     config = StrategyConfig.from_dict("TEST/USDT", config_data)
 
-    exchange = SimulatedExchange(fee=Decimal("0.0004"))
+    exchange = SimulatedExchange(fee=Decimal("0.0002"))  # 0.02% Binance maker fee
     await exchange.setup()
     manager = OrderManager(exchange, data_dir=Path("test_data_temp"))
 

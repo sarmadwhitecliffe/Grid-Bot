@@ -45,8 +45,8 @@ class RiskTier:
     max_drawdown_max: Optional[float]
     consecutive_losses_max: Optional[int]
     capital_allocation: float
-    min_leverage: int  # Minimum leverage for tier (floor for Kelly)
-    max_leverage: int  # Maximum leverage for tier (ceiling for Kelly)
+    leverage_multiplier: float  # Multiplier applied to strategy_config leverage
+    max_leverage_cap: int  # Hard cap on maximum leverage for safety
     max_position_size_usd: Optional[int]
     description: str
 
@@ -151,16 +151,16 @@ def load_risk_tiers_from_config(
                 "min_trades",
                 "min_profit_factor",
                 "capital_allocation_pct",
-                "max_leverage",
+                "leverage_multiplier",
             ]
             missing = [f for f in required_fields if f not in tier_config]
             if missing:
                 raise ValueError(f"Tier {idx} missing required fields: {missing}")
 
             # Validate parameter ranges
-            if tier_config["max_leverage"] <= 0:
+            if tier_config["leverage_multiplier"] <= 0:
                 raise ValueError(
-                    f"Tier {tier_config['name']}: max_leverage must be > 0, got {tier_config['max_leverage']}"
+                    f"Tier {tier_config['name']}: leverage_multiplier must be > 0, got {tier_config['leverage_multiplier']}"
                 )
 
             if not (0 <= tier_config["capital_allocation_pct"] <= 100):
@@ -207,10 +207,8 @@ def load_risk_tiers_from_config(
                 max_drawdown_max=tier_config.get("max_drawdown"),
                 consecutive_losses_max=tier_config.get("max_consecutive_losses"),
                 capital_allocation=tier_config["capital_allocation_pct"] / 100.0,
-                min_leverage=tier_config.get(
-                    "min_leverage", 1
-                ),  # Default to 1 if not specified
-                max_leverage=tier_config["max_leverage"],
+                leverage_multiplier=tier_config.get("leverage_multiplier", 1.0),
+                max_leverage_cap=tier_config.get("max_leverage_cap", 20),
                 max_position_size_usd=tier_config.get("max_position_size_usd"),
                 description=tier_config["description"],
             )
@@ -253,7 +251,7 @@ def load_risk_tiers_from_config(
         )
         for tier in tiers_sorted:
             logger.info(
-                f"  {tier.name}: {tier.capital_allocation * 100:.0f}% capital @ {tier.min_leverage}-{tier.max_leverage}x leverage "
+                f"  {tier.name}: {tier.capital_allocation * 100:.0f}% capital @ {tier.leverage_multiplier}x leverage "
                 f"({tier.min_trades}+ trades, PF>{tier.profit_factor_min:.1f})"
             )
 
@@ -938,28 +936,19 @@ class PositionSizer:
         metrics: PerformanceMetrics,
         current_price: float,
         atr: float,
+        strategy_leverage: float = 5.0,
     ) -> Dict[str, Any]:
         base_allocation = capital * tier.capital_allocation
         dd_multiplier = PositionSizer._calculate_drawdown_multiplier(metrics, tier.name)
         adjusted_allocation = base_allocation * dd_multiplier
-        kelly_leverage = PositionSizer._calculate_kelly_leverage(
-            metrics.win_rate,
-            metrics.avg_win,
-            metrics.avg_loss,
-            metrics.avg_win_r,
-            tier.max_leverage,
-            atr,
-            current_price,
-            metrics.profit_factor,
-        )
 
-        # Apply tier leverage band and quantize to exchange-compatible integer
-        # leverage. Round is used to preserve intent better than truncation.
-        bounded_leverage = max(
-            float(tier.min_leverage),
-            min(float(kelly_leverage), float(tier.max_leverage)),
-        )
-        final_leverage = int(round(bounded_leverage))
+        # New approach: Strategy config leverage × tier multiplier, capped at max_leverage_cap
+        base_leverage = strategy_leverage
+        tier_leverage = base_leverage * tier.leverage_multiplier
+
+        # Apply hard cap for safety
+        final_leverage = min(int(round(tier_leverage)), tier.max_leverage_cap)
+        final_leverage = max(1, final_leverage)  # Minimum 1x leverage
 
         notional = adjusted_allocation * final_leverage
         position_size = notional / current_price if current_price > 0 else 0.0
@@ -968,17 +957,9 @@ class PositionSizer:
             position_size = notional / current_price if current_price > 0 else 0.0
 
         # Determine leverage source for transparency
-        leverage_source = "Composite"
-        if final_leverage == tier.min_leverage and kelly_leverage < tier.min_leverage:
-            leverage_source = f"Tier Min (Composite was {kelly_leverage:.2f}x)"
-        elif final_leverage == tier.max_leverage and kelly_leverage > tier.max_leverage:
-            leverage_source = f"Tier Max (Composite was {kelly_leverage:.2f}x)"
-
-        kelly_reason = (
-            f"Composite: WR={metrics.win_rate * 100:.1f}%, "
-            f"PF={metrics.profit_factor:.2f}, "
-            f"AvgWinR={metrics.avg_win_r:.2f}R "
-            f"-> {kelly_leverage:.2f}x, {leverage_source} -> {final_leverage}x"
+        leverage_reason = (
+            f"Strategy: {base_leverage:.1f}x × Tier multiplier: {tier.leverage_multiplier}x = {tier_leverage:.2f}x "
+            f"(capped at {tier.max_leverage_cap}x) -> {final_leverage}x"
         )
 
         return {
@@ -990,10 +971,10 @@ class PositionSizer:
             "position_size": position_size,
             "base_allocation": base_allocation,
             "drawdown_mult": dd_multiplier,
-            "kelly_leverage": kelly_leverage,
-            "tier_min_leverage": tier.min_leverage,
-            "tier_max_leverage": tier.max_leverage,
-            "kelly_reason": kelly_reason,
+            "strategy_leverage": base_leverage,
+            "tier_leverage_multiplier": tier.leverage_multiplier,
+            "max_leverage_cap": tier.max_leverage_cap,
+            "leverage_reason": leverage_reason,
             "reasoning": f"{tier.name} tier: {tier.capital_allocation * 100}% capital @ {final_leverage}x leverage",
         }
 
@@ -1396,7 +1377,8 @@ class AdaptiveRiskManager:
         return {
             "tier": tier.name,
             "capital_allocation": tier.capital_allocation,
-            "max_leverage": tier.max_leverage,
+            "leverage_multiplier": tier.leverage_multiplier,
+            "max_leverage_cap": tier.max_leverage_cap,
             "description": tier.description,
             "metrics": asdict(metrics) if metrics else None,
             "kill_switch_active": self.kill_switch_active.get(symbol, False),

@@ -63,25 +63,25 @@ class BacktestReport:
 
     def profit_factor(self) -> float:
         """
-        Ratio of total gross profit to total gross loss.
+        Ratio of total gross profit to total gross loss, AFTER fees.
 
         Returns float('inf') if there are no losing trades, 0.0 if no
         profitable trades exist.
         """
         gross_profit = sum(
-            t.realized_pnl
+            t.realized_pnl - (t.fee_usdt or 0)
             for t in self._completed_trades
             if t.realized_pnl and t.realized_pnl > 0
         )
         gross_loss = abs(
             sum(
-                t.realized_pnl
+                t.realized_pnl - (t.fee_usdt or 0)
                 for t in self._completed_trades
                 if t.realized_pnl and t.realized_pnl < 0
             )
         )
         if gross_loss == 0:
-            return float("inf")
+            return float("inf") if gross_profit > 0 else 0.0
         if gross_profit == 0:
             return 0.0
         return gross_profit / gross_loss

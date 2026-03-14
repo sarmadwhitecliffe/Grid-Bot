@@ -189,8 +189,8 @@ async def lifespan(app: FastAPI):
         bot_task = asyncio.create_task(bot_instance.run())
         app.state.bot_task = bot_task
 
-        # Wait for the bot to indicate readiness
-        for _ in range(60):
+        # Wait for the bot to indicate readiness (120 seconds for multi-symbol with many grid levels)
+        for _ in range(120):
             if bot_instance.is_running:
                 logger.info(
                     "✅ bot_v2 TradingBot is initialized and running. Server is fully operational."
@@ -454,14 +454,24 @@ async def process_webhook_signal(payload: WebhookPayload, request: Request):
 
     # Grid Control Commands
     if command == "grid_start":
-        if not hasattr(bot, "grid_orchestrators") or payload.symbol not in bot.grid_orchestrators:
-            raise HTTPException(status_code=400, detail=f"Grid not configured for {payload.symbol}")
+        if (
+            not hasattr(bot, "grid_orchestrators")
+            or payload.symbol not in bot.grid_orchestrators
+        ):
+            raise HTTPException(
+                status_code=400, detail=f"Grid not configured for {payload.symbol}"
+            )
         await bot.grid_orchestrators[payload.symbol].start()
         return {"status": f"Grid started for {payload.symbol}"}
 
     if command == "grid_stop":
-        if not hasattr(bot, "grid_orchestrators") or payload.symbol not in bot.grid_orchestrators:
-            raise HTTPException(status_code=400, detail=f"Grid not active for {payload.symbol}")
+        if (
+            not hasattr(bot, "grid_orchestrators")
+            or payload.symbol not in bot.grid_orchestrators
+        ):
+            raise HTTPException(
+                status_code=400, detail=f"Grid not active for {payload.symbol}"
+            )
         await bot.grid_orchestrators[payload.symbol].stop()
         return {"status": f"Grid stopped for {payload.symbol}"}
 

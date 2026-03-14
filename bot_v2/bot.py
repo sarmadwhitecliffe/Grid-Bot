@@ -303,7 +303,7 @@ class TradingBot:
         self.order_state_manager = OrderStateManager(data_dir=self.data_dir)
 
         # Initialize simulated exchange (always available)
-        fee = Decimal("0.0004")  # 0.04% default fee
+        fee = Decimal("0.0002")  # 0.02% Binance Futures maker fee (limit orders)
         self.sim_exchange = SimulatedExchange(
             fee=fee,
             cache=self.market_data_cache,

@@ -47,7 +47,9 @@ class CostFilter:
             config.slippage_pct / Decimal("100") / Decimal("2")
         )
         slippage_cost = entry_price * (config.slippage_pct / Decimal("100"))
-        fee_cost = entry_price * Decimal(str(os.getenv("FEE_PERCENTAGE", "0.0004")))
+        fee_cost = entry_price * Decimal(
+            str(os.getenv("FEE_PERCENTAGE", "0.0002"))
+        )  # 0.02% Binance maker fee
 
         total_friction_usd = spread_cost + slippage_cost + fee_cost
 

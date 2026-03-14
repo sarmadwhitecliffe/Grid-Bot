@@ -140,16 +140,18 @@ def test_mixed_mode_routing():
             return f"{base}/USDT"
         return symbol
 
-    with patch.object(
-        LiveExchange, "setup", new_callable=AsyncMock
-    ) as mock_live_setup, patch.object(
-        SimulatedExchange, "setup", new_callable=AsyncMock
-    ) as mock_sim_setup, patch.object(
-        LiveExchange, "format_market_id", side_effect=mock_format_market_id
-    ), patch.object(
-        SimulatedExchange, "format_market_id", side_effect=mock_format_market_id
+    with (
+        patch.object(LiveExchange, "setup", new_callable=AsyncMock) as mock_live_setup,
+        patch.object(
+            SimulatedExchange, "setup", new_callable=AsyncMock
+        ) as mock_sim_setup,
+        patch.object(
+            LiveExchange, "format_market_id", side_effect=mock_format_market_id
+        ),
+        patch.object(
+            SimulatedExchange, "format_market_id", side_effect=mock_format_market_id
+        ),
     ):
-
         mock_live_setup.return_value = True
         mock_sim_setup.return_value = True
 
@@ -191,12 +193,12 @@ def test_mixed_mode_routing():
     eth_exchange = bot._get_exchange_for_symbol("ETH/USDT")
     uni_exchange = bot._get_exchange_for_symbol("UNI/USDT")
 
-    assert isinstance(
-        eth_exchange, SimulatedExchange
-    ), "ETHUSDT should use SimulatedExchange"
-    assert isinstance(
-        uni_exchange, SimulatedExchange
-    ), "UNIUSDT should use SimulatedExchange"
+    assert isinstance(eth_exchange, SimulatedExchange), (
+        "ETHUSDT should use SimulatedExchange"
+    )
+    assert isinstance(uni_exchange, SimulatedExchange), (
+        "UNIUSDT should use SimulatedExchange"
+    )
     print("✅ LOCAL_SIM mode symbols correctly routed to SimulatedExchange")
     print(
         f"   - ETH/USDT (mode={strategies['ETH/USDT'].mode}) → {type(eth_exchange).__name__}"
@@ -216,9 +218,9 @@ def test_mixed_mode_routing():
 
     for market_id, expected_capital in expected_capitals.items():
         actual_capital = asyncio.run(bot.capital_manager.get_capital(market_id))
-        assert (
-            actual_capital == expected_capital
-        ), f"{market_id} capital mismatch: expected {expected_capital}, got {actual_capital}"
+        assert actual_capital == expected_capital, (
+            f"{market_id} capital mismatch: expected {expected_capital}, got {actual_capital}"
+        )
         print(f"✅ {market_id}: ${actual_capital} USDT")
 
     # Test 5: Verify mode detection logic
@@ -250,7 +252,9 @@ def test_mixed_mode_routing():
     )
     # Use market_id format (BTC/USDT) since that's what _get_exchange_for_symbol expects
     bot_no_live.strategy_configs = {"BTC/USDT": create_test_strategy("BTCUSDT", "live")}
-    bot_no_live.sim_exchange = SimulatedExchange(Decimal("0.0004"))
+    bot_no_live.sim_exchange = SimulatedExchange(
+        Decimal("0.0002")
+    )  # 0.02% Binance maker fee
     bot_no_live.live_exchange = None  # No live exchange available
 
     try:
@@ -299,10 +303,13 @@ def test_simulated_only_mode():
             return f"{base}/USDT"
         return symbol
 
-    with patch.object(
-        SimulatedExchange, "setup", new_callable=AsyncMock
-    ) as mock_sim_setup, patch.object(
-        SimulatedExchange, "format_market_id", side_effect=mock_format_market_id
+    with (
+        patch.object(
+            SimulatedExchange, "setup", new_callable=AsyncMock
+        ) as mock_sim_setup,
+        patch.object(
+            SimulatedExchange, "format_market_id", side_effect=mock_format_market_id
+        ),
     ):
         mock_sim_setup.return_value = True
         asyncio.run(bot.initialize())

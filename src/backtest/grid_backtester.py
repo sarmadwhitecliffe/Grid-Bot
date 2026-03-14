@@ -14,6 +14,7 @@ Fill rules:
 
 import logging
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import List, Optional, Tuple
 
 import pandas as pd
@@ -25,8 +26,9 @@ from src.strategy.regime_detector import RegimeDetector
 
 logger = logging.getLogger(__name__)
 
-MAKER_FEE: float = 0.001  # 0.1% maker fee
+MAKER_FEE: float = 0.0002  # 0.02% Binance Futures maker fee (limit orders)
 SLIPPAGE: float = 0.0001  # 0.01% adverse slippage on fills
+MIN_ORDER_VALUE: float = 5.0  # Minimum USDT value per grid order
 
 
 @dataclass
@@ -137,12 +139,17 @@ class GridBacktester:
             adx_threshold=settings.ADX_THRESHOLD,
             bb_width_threshold=getattr(settings, "bb_width_threshold", 0.04),
         )
+        leverage = settings.LEVERAGE
+        available_capital = self.initial_capital * leverage
+        max_grids = int(available_capital / MIN_ORDER_VALUE)
+        num_grids = min(settings.NUM_GRIDS_UP, max_grids)
+
         self.calculator = GridCalculator(
             grid_type=GridType(settings.GRID_TYPE),
             spacing_pct=settings.GRID_SPACING_PCT,
             spacing_abs=settings.GRID_SPACING_ABS,
-            num_grids_up=settings.NUM_GRIDS_UP,
-            num_grids_down=settings.NUM_GRIDS_DOWN,
+            num_grids_up=num_grids,
+            num_grids_down=num_grids,
             order_size_quote=settings.ORDER_SIZE_QUOTE,
             price_step=0.0001,
             lower_bound=settings.LOWER_BOUND,
@@ -163,12 +170,17 @@ class GridBacktester:
         from ta.trend import ADXIndicator
         from ta.volatility import BollingerBands
 
-        adx_series = ADXIndicator(
-            high=ohlcv_df["high"],
-            low=ohlcv_df["low"],
-            close=ohlcv_df["close"],
-            window=self.regime_detector.adx_period,
-        ).adx().ffill().fillna(0)
+        adx_series = (
+            ADXIndicator(
+                high=ohlcv_df["high"],
+                low=ohlcv_df["low"],
+                close=ohlcv_df["close"],
+                window=self.regime_detector.adx_period,
+            )
+            .adx()
+            .ffill()
+            .fillna(0)
+        )
 
         bb = BollingerBands(
             close=ohlcv_df["close"],
@@ -207,12 +219,12 @@ class GridBacktester:
                     # Simplified: 0.01% per interval
                     funding_rate = 0.0001
 
-                    long_val = sum(p * a for p, a in long_inventory)
-                    short_val = sum(p * a for p, a in short_inventory)
+                    long_val = sum(float(p * a) for p, a in long_inventory)
+                    short_val = sum(float(p * a) for p, a in short_inventory)
 
                     # Longs pay shorts if funding is positive
                     # Here we just deduct from both as a conservative "cost"
-                    funding_cost = (long_val + short_val) * funding_rate
+                    funding_cost = float(long_val + short_val) * funding_rate
                     equity -= funding_cost
                     result.funding_fees_usdt += funding_cost
                     last_funding_time = current_time
@@ -227,9 +239,11 @@ class GridBacktester:
 
             # Check Longs
             for entry_price, amount in long_inventory[:]:
-                liq_price = entry_price * (1 - (1 / self.settings.LEVERAGE) + mm)
+                liq_price = entry_price * (
+                    Decimal(1) - Decimal(1 / self.settings.LEVERAGE) + Decimal(str(mm))
+                )
                 if bar_low <= liq_price:
-                    loss = (liq_price - entry_price) * amount
+                    loss = float(liq_price - entry_price) * float(amount)
                     equity += loss  # loss is negative
                     long_inventory.remove((entry_price, amount))
                     logger.debug("Bar %d: LONG liquidated at %.2f", i, liq_price)
@@ -251,9 +265,11 @@ class GridBacktester:
 
             # Check Shorts
             for entry_price, amount in short_inventory[:]:
-                liq_price = entry_price * (1 + (1 / self.settings.LEVERAGE) - mm)
+                liq_price = entry_price * (
+                    Decimal(1) + Decimal(1 / self.settings.LEVERAGE) - Decimal(str(mm))
+                )
                 if bar_high >= liq_price:
-                    loss = (entry_price - liq_price) * amount
+                    loss = float(entry_price - liq_price) * float(amount)
                     equity += loss  # loss is negative
                     short_inventory.remove((entry_price, amount))
                     logger.debug("Bar %d: SHORT liquidated at %.2f", i, liq_price)
@@ -334,16 +350,20 @@ class GridBacktester:
                 fill_price = order.price
 
                 if order.side == "buy" and bar_low <= order.price:
-                    fill_price = order.price * (1 - self.slippage)
+                    fill_price = order.price * (
+                        Decimal(1) - Decimal(str(self.slippage))
+                    )
                     filled = True
                 elif order.side == "sell" and bar_high >= order.price:
-                    fill_price = order.price * (1 + self.slippage)
+                    fill_price = order.price * (
+                        Decimal(1) + Decimal(str(self.slippage))
+                    )
                     filled = True
 
                 if not filled:
                     continue
 
-                fee = fill_price * order.amount * self.maker_fee
+                fee = float(fill_price * order.amount) * self.maker_fee
                 equity -= fee
                 result.total_fees_usdt += fee
 
@@ -356,7 +376,8 @@ class GridBacktester:
                     amount=order.amount,
                     fee_usdt=fee,
                     equity_after=equity,
-                    open_orders_at_fill=len(open_orders) - 1,  # Number of other active orders
+                    open_orders_at_fill=len(open_orders)
+                    - 1,  # Number of other active orders
                 )
 
                 # Logic for LONG side
@@ -377,7 +398,7 @@ class GridBacktester:
                     else:  # side="sell" -> Closing/Reducing Long
                         if long_inventory:
                             entry_p, _ = long_inventory.pop(0)
-                            pnl = (fill_price - entry_p) * order.amount
+                            pnl = float(fill_price - entry_p) * float(order.amount)
                             equity += pnl
                             trade.realized_pnl = pnl
                         # Place counter buy order (Opening Long)
@@ -410,7 +431,7 @@ class GridBacktester:
                     else:  # side="buy" -> Closing/Reducing Short
                         if short_inventory:
                             entry_p, _ = short_inventory.pop(0)
-                            pnl = (entry_p - fill_price) * order.amount
+                            pnl = float(entry_p - fill_price) * float(order.amount)
                             equity += pnl
                             trade.realized_pnl = pnl
                         # Place counter sell order (Opening Short)

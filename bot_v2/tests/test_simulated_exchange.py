@@ -9,7 +9,7 @@ from bot_v2.models.enums import TradeSide
 
 @pytest.mark.asyncio
 async def test_slippage_simulation_buy():
-    sim = SimulatedExchange(fee=Decimal("0.0004"), slippage_pct=1.0)
+    sim = SimulatedExchange(fee=Decimal("0.0002"), slippage_pct=1.0)
     price = Decimal("100")
     # Patch get_market_price to return fixed price
     sim.get_market_price = lambda market_id: asyncio.Future()
@@ -27,7 +27,7 @@ async def test_slippage_simulation_buy():
 
 @pytest.mark.asyncio
 async def test_slippage_simulation_sell():
-    sim = SimulatedExchange(fee=Decimal("0.0004"), slippage_pct=2.0)
+    sim = SimulatedExchange(fee=Decimal("0.0002"), slippage_pct=2.0)
     price = Decimal("200")
 
     async def fake_get_market_price(market_id):

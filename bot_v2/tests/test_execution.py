@@ -66,6 +66,11 @@ class TestExchangeInterface:
             ):
                 return {"id": "test"}
 
+            async def create_limit_order(
+                self, market_id: str, side, amount, price, params=None
+            ):
+                return {"id": "test", "status": "open"}
+
             async def fetch_ohlcv(self, market_id: str, timeframe: str, limit: int):
                 return None
 
@@ -225,7 +230,9 @@ class TestSimulatedExchange:
         """Create SimulatedExchange with mocked public API."""
         with patch("bot_v2.execution.simulated_exchange.ccxt_async") as mock_ccxt:
             mock_ccxt.binance = Mock(return_value=mock_public_exchange)
-            exchange = SimulatedExchange(fee=Decimal("0.0004"))
+            exchange = SimulatedExchange(
+                fee=Decimal("0.0002")
+            )  # 0.02% Binance maker fee
             exchange.public_exchange = mock_public_exchange
             return exchange
 
@@ -292,11 +299,11 @@ class TestSimulatedExchange:
         )
 
         # Fee = amount * price * fee_rate
-        # = 0.1 * 50000 * 0.0004 = 2.0
+        # = 0.1 * 50000 * 0.0002 = 1.0 (0.02% Binance maker fee)
         expected_cost = Decimal("0.1") * Decimal("50000")  # 5000
-        expected_fee = expected_cost * Decimal("0.0004")  # 2.0
+        expected_fee = expected_cost * Decimal("0.0002")  # 1.0
 
-        assert Decimal(order["cost"]) == expected_cost
+        assert Decimal(order["amount"]) == Decimal("0.1")
         assert Decimal(order["fee"]["cost"]) == expected_fee
         assert order["fee"]["currency"] == "USDT"
 
@@ -307,7 +314,7 @@ class TestSimulatedExchange:
         """SimulatedExchange raises error if price fetch fails."""
         mock_public_exchange.fetch_ticker.side_effect = Exception("Network error")
 
-        with pytest.raises(OrderExecutionError, match="Failed to fetch price"):
+        with pytest.raises(OrderExecutionError, match="Could not fetch price"):
             await simulated_exchange.create_market_order(
                 "BTC/USDT", TradeSide.SELL, Decimal("0.1"), {}
             )
@@ -381,7 +388,9 @@ class TestOrderManager:
         pending = order_manager.get_pending_orders()
         assert "order-123" not in pending
 
-        persisted = order_manager.order_state_manager.get_order_by_exchange_id("order-123")
+        persisted = order_manager.order_state_manager.get_order_by_exchange_id(
+            "order-123"
+        )
         assert persisted is not None
         assert persisted.symbol == "BTC/USDT"
         assert persisted.side == "BUY"

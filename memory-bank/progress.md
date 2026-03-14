@@ -56,6 +56,23 @@ post_date: "2026-03-14"
 - Orders stored as "BTCUSDT" but queried as "BTC/USDT"
 - Now uses `normalize_to_market_format()` from symbol_utils.py
 
+### 5. Leverage Multiplier Implementation (2026-03-14)
+- **Problem**: Backtest-optimized leverage (e.g., 10x for BTC) didn't match adaptive risk tiers (PROBATION max 2x)
+- **Solution**: Implemented leverage multiplier per tier, applied to strategy_config leverage
+- **Files Changed**:
+  - `config/adaptive_risk_tiers.json` - Replaced `min_leverage`/`max_leverage` with `leverage_multiplier` and `max_leverage_cap`
+  - `bot_v2/risk/adaptive_risk_manager.py` - Updated `RiskTier` dataclass and `PositionSizer.calculate_position_size()`
+- **New Tier Configuration**:
+  - PROBATION: 0.5x multiplier (max 10x cap)
+  - CONSERVATIVE: 0.7x multiplier (max 15x cap)
+  - STANDARD: 1.0x multiplier (max 20x cap)
+  - AGGRESSIVE: 1.0x multiplier (max 25x cap)
+  - CHAMPION: 1.2x multiplier (max 30x cap)
+- **Calculation**: `final_leverage = strategy_config_leverage × tier_multiplier`
+- **Example**: BTC with 10x config leverage:
+  - PROBATION: 10 × 0.5 = 5x
+  - CHAMPION: 10 × 1.2 = 12x
+
 ## Remaining to Build
 
 - Test capital-aware grid sizing with live symbols
@@ -67,3 +84,4 @@ post_date: "2026-03-14"
 - Previously: Order recovery failed on restart (fixed)
 - Previously: Performance metrics showed wrong equity values (fixed)
 - Previously: Grid stopped after TP and required manual restart (fixed)
+- Previously: Leverage mismatch between backtest and adaptive risk (fixed)
