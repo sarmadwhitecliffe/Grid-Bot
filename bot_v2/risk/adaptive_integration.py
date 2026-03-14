@@ -223,8 +223,12 @@ class AdaptiveRiskIntegration:
 
     def get_all_tiers_status(self) -> Dict[str, Dict[str, Any]]:
         """Get tier status for all configured symbols."""
+        if not self.risk_manager.capital_manager:
+            logger.warning("No capital_manager configured, returning empty status")
+            return {}
+
         tiers_status = {}
-        for symbol in self.capital_manager._capitals.keys():
+        for symbol in self.risk_manager.capital_manager._capitals.keys():
             tier_info = self.get_tier_info(symbol)
             tiers_status[symbol] = {
                 "tier": tier_info.get("tier", "UNKNOWN"),

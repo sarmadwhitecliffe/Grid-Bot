@@ -423,7 +423,24 @@ async def process_webhook_signal(payload: WebhookPayload, request: Request):
         logger.debug(f"Webhook metadata summary: {summary}")
 
     bot: TradingBot = getattr(request.app.state, "bot", None)
-    command = payload.action.strip().lower()
+    raw_action = payload.action.strip()
+
+    # Support command format: "LONG HYPE", "SHORT HYPEUSDT", "EXIT HYPE", "START", "STOP"
+    # Also support combined format in action field like "LONG HYPE"
+    command_parts = raw_action.split()
+    command = command_parts[0].lower()
+
+    # If symbol provided in action field (e.g., "LONG HYPE"), use it
+    if len(command_parts) > 1 and not payload.symbol:
+        payload.symbol = command_parts[1].strip()
+
+    # Normalize symbol (append USDT if not present)
+    if payload.symbol:
+        symbol_input = payload.symbol.strip().upper()
+        if not symbol_input.endswith(("USDT", "/USDT")) and "/" not in symbol_input:
+            payload.symbol = f"{symbol_input}USDT"
+        elif "/" in symbol_input:
+            payload.symbol = symbol_input.replace("/", "")  # HYPE/USDT -> HYPEUSDT
 
     # Immediate commands that affect runtime behavior
     if command == "start":
@@ -435,6 +452,40 @@ async def process_webhook_signal(payload: WebhookPayload, request: Request):
         request.app.state.trading_enabled = False
         logger.info("Signal processing has been STOPPED.")
         return {"status": "Trading disabled."}
+
+    # STATUS command - Get current positions (works even if bot not fully running)
+    if command == "status":
+        if not bot:
+            raise HTTPException(status_code=503, detail="Bot not available")
+        try:
+            status_message = await bot.get_status_message()
+            return {"status": "ok", "message": status_message}
+        except Exception as e:
+            logger.error(f"Error getting status: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to get status: {str(e)}"
+            )
+
+    # SUMMARY command - Get performance summary (supports SUMMARY 24 or SUMMARY 168)
+    if command == "summary":
+        if not bot or not bot.is_running:
+            raise HTTPException(status_code=503, detail="Trading bot is not running.")
+        # Parse hours from metadata or default to 24
+        hours = 24
+        if payload.metadata and "hours" in payload.metadata:
+            hours = int(payload.metadata["hours"])
+        # Also check if symbol field contains hours (e.g., "168" as symbol)
+        elif payload.symbol and payload.symbol.isdigit():
+            hours = int(payload.symbol)
+            payload.symbol = None  # Clear it so it doesn't fail symbol validation later
+        try:
+            summary_message = await bot.get_summary_message(hours=hours)
+            return {"status": "ok", "message": summary_message}
+        except Exception as e:
+            logger.error(f"Error getting summary: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to get summary: {str(e)}"
+            )
 
     # --- From here, we handle trade signals ---
     if not bot or not bot.is_running:
@@ -474,6 +525,17 @@ async def process_webhook_signal(payload: WebhookPayload, request: Request):
             )
         await bot.grid_orchestrators[payload.symbol].stop()
         return {"status": f"Grid stopped for {payload.symbol}"}
+
+    # Map new command names to internal actions
+    action_mapping = {
+        "long": "buy",
+        "short": "sell",
+        "exit": "exit",
+    }
+
+    # Normalize action: "LONG" -> "buy", "SHORT" -> "sell", "EXIT" -> "exit"
+    if command in action_mapping:
+        command = action_mapping[command]
 
     valid_trade_actions = ["buy", "sell", "exit"]
     if command not in valid_trade_actions:

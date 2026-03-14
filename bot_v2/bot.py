@@ -659,6 +659,7 @@ class TradingBot:
                     capital_manager=self.capital_manager,
                     on_grid_trade_closed=self._on_grid_trade_closed,
                     on_grid_fill=self._on_grid_fill,
+                    on_state_persist=self._on_grid_state_persist,
                 )
 
                 # Restore high-level state if available
@@ -681,13 +682,18 @@ class TradingBot:
                 # AUTO-START: Start if was active OR if grid_enabled is set to true
                 is_previously_active = (
                     self.grid_states.get(symbol).is_active
-                    if symbol in self.grid_states
+                    if symbol in self.grid_states and self.grid_states.get(symbol)
                     else False
+                )
+
+                # Get persisted state for recovery
+                persisted_state = (
+                    self.grid_states.get(symbol) if symbol in self.grid_states else None
                 )
 
                 if config.grid_enabled or is_previously_active:
                     logger.info(f"[{symbol}] Starting grid orchestrator...")
-                    await orchestrator.start()
+                    await orchestrator.start(persisted_state=persisted_state)
 
                 logger.info(f"[{symbol}] Grid Orchestrator ready.")
 
@@ -2719,6 +2725,32 @@ class TradingBot:
             self.state_manager.append_fill_log_event,
             fill_event,
         )
+
+    def _on_grid_state_persist(self, symbol: str, state) -> None:
+        """Callback to persist grid state during shutdown."""
+        from bot_v2.models.grid_state import GridState
+
+        if not isinstance(state, GridState):
+            state = GridState(
+                symbol_id=state.symbol_id,
+                is_active=state.is_active,
+                centre_price=state.centre_price,
+                active_orders=state.active_orders,
+                grid_fills=state.grid_fills,
+                counter_fills=state.counter_fills,
+                last_tick_time=state.last_tick_time,
+                shutdown_time=state.shutdown_time,
+                shutdown_reason=state.shutdown_reason,
+                should_resume=state.should_resume,
+                deployment_count=state.deployment_count,
+            )
+
+        # Update local cache
+        self.grid_states[symbol] = state
+
+        # Persist to disk
+        self.state_manager.save_grid_states(self.grid_states)
+        logger.debug(f"[{symbol}] Persisted grid state via callback")
 
     async def _run_grid_orchestrators_tick(self) -> None:
         """Run one tick for all active grid orchestrators with concurrent data fetches."""

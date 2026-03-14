@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from bot_v2.models.strategy_config import StrategyConfig
 from bot_v2.models.enums import TradeSide
 from bot_v2.models.exceptions import InsufficientGridCapital
+from bot_v2.models.grid_state import GridState
 from src.strategy.grid_calculator import GridCalculator, GridType
 from src.strategy.regime_detector import RegimeDetector, MarketRegime
 
@@ -51,6 +52,7 @@ class GridOrchestrator:
             Callable[[Dict[str, Any]], Awaitable[None]]
         ] = None,
         on_grid_fill: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        on_state_persist: Optional[Callable[[str, "GridState"], None]] = None,
     ):
         self.symbol = symbol
         self.config = config
@@ -60,6 +62,7 @@ class GridOrchestrator:
         self.capital_manager = capital_manager
         self.on_grid_trade_closed = on_grid_trade_closed
         self.on_grid_fill = on_grid_fill
+        self.on_state_persist = on_state_persist
 
         # Initialize specialized components from src/
         self.calculator = self._init_calculator()
@@ -87,6 +90,7 @@ class GridOrchestrator:
         self.last_stop_time: Optional[float] = None
         self.last_stop_reason: Optional[str] = None
         self._last_regime_check_time: Optional[float] = None
+        self._deployment_count: int = 0  # Track number of deployments
         # Open inventory lots used to pair fills into closed grid trades.
         self._open_long_lots: List[Dict[str, Any]] = []
         self._open_short_lots: List[Dict[str, Any]] = []
@@ -352,8 +356,13 @@ class GridOrchestrator:
 
         return (levels_up, levels_down, order_size)
 
-    async def start(self):
-        """Start the grid session."""
+    async def start(self, persisted_state: Optional[GridState] = None):
+        """Start the grid session.
+
+        Args:
+            persisted_state: Optional GridState loaded from grid_states.json on startup.
+                           If provided, will attempt to recover orders from this state first.
+        """
         if self.is_active:
             logger.warning(f"[{self.symbol}] Grid session already active.")
             return
@@ -361,10 +370,49 @@ class GridOrchestrator:
         logger.info(f"[{self.symbol}] Starting Grid session.")
         self.is_active = True
 
-        # 1. Attempt recovery from persistent state
+        # 1. Check persisted state from previous session (from grid_states.json)
+        if persisted_state:
+            # Check if we should auto-resume based on shutdown reason
+            if persisted_state.shutdown_reason:
+                safety_reasons = ["PORTFOLIO_HALT", "EMERGENCY", "MAX_DD", "CRASH"]
+                if any(
+                    r in persisted_state.shutdown_reason.upper() for r in safety_reasons
+                ):
+                    logger.warning(
+                        f"[{self.symbol}] Grid was stopped for safety reason "
+                        f"'{persisted_state.shutdown_reason}'. Requires manual restart."
+                    )
+                    self.is_active = False
+                    return
+
+                # If stopped due to TRENDING, wait for regime check before deploying
+                if "TRENDING" in persisted_state.shutdown_reason.upper():
+                    logger.info(
+                        f"[{self.symbol}] Grid was stopped due to TRENDING market. "
+                        f"Will check regime before deployment."
+                    )
+
+            # Recover orders from persisted state
+            if persisted_state.active_orders:
+                recovered_count = 0
+                for order_id, metadata in persisted_state.active_orders.items():
+                    self.grid_order_ids.add(order_id)
+                    self.order_metadata[order_id] = metadata
+                    recovered_count += 1
+
+                if recovered_count > 0:
+                    logger.info(
+                        f"[{self.symbol}] Recovered {recovered_count} orders from persisted state."
+                    )
+
+                # Restore other session data
+                self.centre_price = persisted_state.centre_price
+                self._deployment_count = persisted_state.deployment_count
+
+        # 2. Also try to recover from OrderStateManager (for orders created during session)
         await self.recover_state()
 
-        # 2. Initial Deployment if no orders found
+        # 3. Initial Deployment if no orders found
         if not self.grid_order_ids:
             ticker = await self.exchange.get_market_price(self.symbol)
             if ticker:
@@ -470,6 +518,11 @@ class GridOrchestrator:
         import time as time_module
 
         logger.info(f"[{self.symbol}] Stopping Grid session: {reason}")
+
+        # PERSIST STATE BEFORE CANCELLING ORDERS
+        # This preserves order info for recovery on next startup
+        await self._persist_state_for_shutdown(reason)
+
         cancel_policy = getattr(self.config, "grid_stop_policy", "cancel_open_orders")
         should_cancel = cancel_policy != "keep_open_orders"
 
@@ -486,6 +539,47 @@ class GridOrchestrator:
         self.is_active = False
         self.last_stop_time = time_module.time()
         self.last_stop_reason = reason
+
+    async def _persist_state_for_shutdown(self, reason: str):
+        """Persist grid state before shutdown for recovery on next startup."""
+        from bot_v2.models.grid_state import GridState
+
+        # Determine if we should auto-resume based on shutdown reason
+        safety_reasons = ["PORTFOLIO_HALT", "EMERGENCY", "MAX_DD", "CRASH"]
+        should_resume = not any(r in reason.upper() for r in safety_reasons)
+
+        # Determine shutdown reason for smart resume
+        shutdown_reason = reason
+
+        state = GridState(
+            symbol_id=self.symbol,
+            is_active=False,  # Mark as inactive (will be set true on resume)
+            centre_price=self.centre_price,
+            active_orders={
+                str(oid): self.order_metadata.get(str(oid), {})
+                for oid in self.grid_order_ids
+            },
+            session_start_time=None,  # Will be set on next start
+            grid_fills=self.session_fill_count,
+            counter_fills=0,
+            last_tick_time=datetime.now(timezone.utc),
+            shutdown_time=datetime.now(timezone.utc),
+            shutdown_reason=shutdown_reason,
+            should_resume=should_resume,
+            deployment_count=getattr(self, "_deployment_count", 0),
+        )
+
+        if self.on_state_persist:
+            try:
+                self.on_state_persist(self.symbol, state)
+                logger.info(
+                    f"[{self.symbol}] Persisted grid state for shutdown: "
+                    f"orders={len(state.active_orders)}, reason={reason}, should_resume={should_resume}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[{self.symbol}] Failed to persist state on shutdown: {e}"
+                )
 
     async def _bank_and_reinvest(self, reason: str = "Session TP"):
         """Bank realized gains, reset session trackers, and deploy a new grid.
@@ -637,6 +731,7 @@ class GridOrchestrator:
         """Calculate and place all limit orders."""
         logger.info(f"[{self.symbol}] Deploying grid around {centre}")
         self.centre_price = centre
+        self._deployment_count += 1  # Track deployment count
 
         try:
             if getattr(self.config, "grid_capital_constraint", True):

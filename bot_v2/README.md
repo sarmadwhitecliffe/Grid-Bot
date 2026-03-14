@@ -39,13 +39,18 @@ The bot supports remote management via JSON webhooks (POST to `/webhook`):
 
 | Command | Payload Example | Description |
 | :--- | :--- | :--- |
+| **`LONG SYMBOL`** | `{"action": "LONG HYPE", "symbol": "HYPE"}` or `{"action": "LONG", "symbol": "HYPEUSDT"}` | Enter long position. Symbol can be HYPE, HYPE/USDT, or HYPEUSDT. |
+| **`SHORT SYMBOL`** | `{"action": "SHORT HYPE", "symbol": "HYPE"}` or `{"action": "SHORT", "symbol": "HYPEUSDT"}` | Enter short position. |
+| **`EXIT SYMBOL`** | `{"action": "EXIT HYPE", "symbol": "HYPE"}` or `{"action": "EXIT", "symbol": "HYPEUSDT"}` | Exit all positions for symbol. |
+| **`STATUS`** | `{"action": "STATUS"}` | Get current positions status. |
+| **`SUMMARY`** | `{"action": "SUMMARY", "symbol": "24"}` or `{"action": "SUMMARY", "metadata": {"hours": 168}}` | Get 24h performance summary. Use symbol="168" or metadata.hours for 7 days. |
+| **`START`** | `{"action": "START"}` | Enable trading (signals will be processed). |
+| **`STOP`** | `{"action": "STOP"}` | Disable trading (signals ignored). |
 | **`grid_start`** | `{"action": "grid_start", "symbol": "BTC/USDT"}` | Deploys a new grid for the specified symbol. |
 | **`grid_stop`** | `{"action": "grid_stop", "symbol": "BTC/USDT"}` | Stops the active grid and cancels all pending levels. |
-| **`buy`** | `{"action": "buy", "symbol": "ETH/USDT"}` | Executes a standard long entry signal. |
-| **`sell`** | `{"action": "sell", "symbol": "ETH/USDT"}` | Executes a standard short entry signal. |
-| **`exit`** | `{"action": "exit", "symbol": "ETH/USDT"}` | Closes all positions for the specified symbol. |
-| **`start`** | `{"action": "start"}` | Enables signal processing globally. |
-| **`stop`** | `{"action": "stop"}` | Disables signal processing globally. |
+| **`buy`** | `{"action": "buy", "symbol": "ETH/USDT"}` | Executes a standard long entry signal (legacy). |
+| **`sell`** | `{"action": "sell", "symbol": "ETH/USDT"}` | Executes a standard short entry signal (legacy). |
+| **`exit`** | `{"action": "exit", "symbol": "ETH/USDT"}` | Closes all positions for the specified symbol (legacy). |
 
 ## Known Limitations & Runtime Considerations
 
