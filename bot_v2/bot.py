@@ -2754,6 +2754,22 @@ class TradingBot:
         now_iso = datetime.now(timezone.utc).isoformat()
         for symbol, orchestrator in self.grid_orchestrators.items():
             centre_price = getattr(orchestrator, "centre_price", None)
+
+            # Get open position values
+            open_long_value = Decimal("0")
+            open_short_value = Decimal("0")
+            if hasattr(orchestrator, "_open_long_lots"):
+                for lot in orchestrator._open_long_lots:
+                    open_long_value += lot["amount"] * lot["entry_price"]
+            if hasattr(orchestrator, "_open_short_lots"):
+                for lot in orchestrator._open_short_lots:
+                    open_short_value += lot["amount"] * lot["entry_price"]
+
+            has_unmatched = (
+                len(getattr(orchestrator, "_open_long_lots", [])) > 0
+                or len(getattr(orchestrator, "_open_short_lots", [])) > 0
+            )
+
             exposure_snapshot[symbol] = {
                 "timestamp": now_iso,
                 "is_active": bool(getattr(orchestrator, "is_active", False)),
@@ -2776,6 +2792,10 @@ class TradingBot:
                 "session_reinvest_count": int(
                     getattr(orchestrator, "session_reinvest_count", 0)
                 ),
+                # New fields for unmatched position tracking
+                "open_long_value": str(open_long_value),
+                "open_short_value": str(open_short_value),
+                "has_unmatched_positions": has_unmatched,
             }
         self.state_manager.save_grid_exposure_snapshot(exposure_snapshot)
 

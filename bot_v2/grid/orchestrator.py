@@ -531,10 +531,40 @@ class GridOrchestrator:
         self.last_stop_time = time_module.time()
         self.last_stop_reason = reason
 
+    def _has_unmatched_positions(self) -> bool:
+        """Check if there are unmatched LONG or SHORT positions that need to be closed."""
+        return len(self._open_long_lots) > 0 or len(self._open_short_lots) > 0
+
+    def _get_unmatched_position_values(self) -> tuple[Decimal, Decimal]:
+        """Get the total value of unmatched LONG and SHORT positions."""
+        open_long_value = Decimal("0")
+        for lot in self._open_long_lots:
+            open_long_value += lot["amount"] * lot["entry_price"]
+
+        open_short_value = Decimal("0")
+        for lot in self._open_short_lots:
+            open_short_value += lot["amount"] * lot["entry_price"]
+
+        return open_long_value, open_short_value
+
     async def _bank_session_pnl(self, reason: str = "Session End"):
-        """Bank the accumulated session PnL to capital before resetting."""
+        """Bank the accumulated session PnL to capital before resetting.
+
+        Only banks PnL if there are no unmatched open positions.
+        Defers banking if positions are still open to avoid phantom profits.
+        """
         if self.session_realized_pnl_quote == Decimal("0"):
             logger.debug(f"[{self.symbol}] No session PnL to bank (0)")
+            return
+
+        # Check for unmatched positions - don't bank if positions are still open
+        if self._has_unmatched_positions():
+            open_long_value, open_short_value = self._get_unmatched_position_values()
+            logger.warning(
+                f"[{self.symbol}] CANNOT bank session PnL ${self.session_realized_pnl_quote:+.2f} - "
+                f"unmatched positions detected: LONG=${open_long_value:.2f}, SHORT=${open_short_value:.2f}. "
+                f"Deferring banking until positions close. This prevents phantom profits."
+            )
             return
 
         pnl_to_bank = self.session_realized_pnl_quote
