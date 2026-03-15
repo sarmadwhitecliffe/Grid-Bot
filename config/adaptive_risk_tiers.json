@@ -1,6 +1,6 @@
 {
-  "description": "Optimized Adaptive Risk Management Tier Configuration",
-  "version": "1.4-2026-03-14",
+  "description": "Grid-Density Adaptive Risk Management Tier Configuration v2.0",
+  "version": "2.0-2026-03-15",
   "tiers": [
     {
       "name": "PROBATION",
@@ -13,10 +13,9 @@
       "min_win_rate": null,
       "max_drawdown": null,
       "max_consecutive_losses": 12,
-      "capital_allocation_pct": 30,
+      "level_allocation_ratio": 0.50,
       "leverage_multiplier": 0.5,
-      "max_leverage_cap": 10,
-      "max_position_size_usd": 2000
+      "max_leverage_cap": 10
     },
     {
       "name": "CONSERVATIVE",
@@ -29,10 +28,9 @@
       "min_win_rate": 0.35,
       "max_drawdown": null,
       "max_consecutive_losses": 10,
-      "capital_allocation_pct": 40,
+      "level_allocation_ratio": 0.65,
       "leverage_multiplier": 0.7,
-      "max_leverage_cap": 15,
-      "max_position_size_usd": 2500
+      "max_leverage_cap": 15
     },
     {
       "name": "STANDARD",
@@ -45,10 +43,9 @@
       "min_win_rate": 0.40,
       "max_drawdown": 0.25,
       "max_consecutive_losses": 8,
-      "capital_allocation_pct": 50,
+      "level_allocation_ratio": 0.80,
       "leverage_multiplier": 1.0,
-      "max_leverage_cap": 20,
-      "max_position_size_usd": 4000
+      "max_leverage_cap": 20
     },
     {
       "name": "AGGRESSIVE",
@@ -61,10 +58,9 @@
       "min_win_rate": 0.45,
       "max_drawdown": 0.15,
       "max_consecutive_losses": 7,
-      "capital_allocation_pct": 65,
+      "level_allocation_ratio": 0.90,
       "leverage_multiplier": 1.0,
-      "max_leverage_cap": 25,
-      "max_position_size_usd": 6500
+      "max_leverage_cap": 25
     },
     {
       "name": "CHAMPION",
@@ -76,11 +72,10 @@
       "min_sharpe_ratio": 1.5,
       "min_win_rate": 0.50,
       "max_drawdown": 0.12,
-      "max_consecutive_losses": 6,  
-      "capital_allocation_pct": 80,
+      "max_consecutive_losses": 6,
+      "level_allocation_ratio": 1.00,
       "leverage_multiplier": 1.2,
-      "max_leverage_cap": 30,
-      "max_position_size_usd": 12000
+      "max_leverage_cap": 30
     }
   ],
   "settings": {
@@ -96,7 +91,10 @@
     "drawdown_scale_threshold_pct": 10.0,
     "drawdown_scale_factor": 0.5,
     "enable_portfolio_heat_limit": true,
-    "max_portfolio_heat_pct": 8.0
+    "max_portfolio_heat_pct": 8.0,
+    "min_order_size_usd": 5.0,
+    "max_order_size_usd": 100.0,
+    "min_grid_levels": 10
   },
   "tier_portfolio_caps": {
     "CHAMPION": 40,
@@ -124,22 +122,23 @@
     "high": 4000
   },
   "metadata": {
-    "last_review_date": "2026-03-13",
+    "last_review_date": "2026-03-15",
     "auto_adjust_enabled": false,
     "data_source": "grid_mode_optimized",
-    "grid_mode_multiplier": 3
+    "grid_mode_multiplier": 3,
+    "version_notes": "v2.0: Replaced capital_allocation_pct with level_allocation_ratio for grid architecture"
   },
   "comments": {
-    "capital_allocation_pct": "Percentage of available capital to use for position sizing",
-    "leverage_multiplier": "Multiplier applied to strategy_config leverage (1.0 = use config as-is)",
+    "level_allocation_ratio": "Fraction of configured grid levels to activate (0.0-1.0). Always rounded to even for symmetric grids. Tier progression: 0.50→0.65→0.80→0.90→1.00",
+    "leverage_multiplier": "Multiplier applied to strategy_config leverage (1.0 = use config as-is). Applied after tier ratio determines active levels.",
     "max_leverage_cap": "Hard cap on maximum leverage for safety (regardless of multiplier)",
-    "max_position_size_usd": "Hard cap on position size in USD regardless of capital",
     "profit_factor": "Ratio of gross profit to gross loss (higher is better)",
     "sharpe_ratio": "Risk-adjusted returns (higher is better, >1.0 is good)",
     "win_rate": "Percentage of winning trades (0.0 to 1.0)",
     "max_drawdown": "Maximum allowed drawdown percentage (0.0 to 1.0)",
     "max_consecutive_losses": "Maximum consecutive losses before tier demotion",
     "boundary_policy": "How to treat thresholds; evaluated using tier_eval_order top-down",
-    "pf_min_trades_for_validation": "Minimum trades needed in lookback for PF to be considered stable"
+    "pf_min_trades_for_validation": "Minimum trades needed in lookback for PF to be considered stable",
+    "tier_change_behavior": "Grid parameters recalculated at next re-centre. No immediate grid restructuring on tier change."
   }
 }

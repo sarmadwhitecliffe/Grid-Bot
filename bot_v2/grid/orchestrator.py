@@ -240,12 +240,13 @@ class GridOrchestrator:
 
         try:
             tier_info = self.risk_manager.get_tier_info(self.symbol)
-            allocation_pct = Decimal(str(tier_info.get("capital_allocation", 1.0)))
-            adjusted_size = base_order_size * allocation_pct
+            # Use level_allocation_ratio for grid sizing (convert to Decimal for compatibility)
+            level_ratio = tier_info.get("level_allocation_ratio", 1.0)
+            adjusted_size = base_order_size * Decimal(str(level_ratio))
 
             logger.info(
                 f"[{self.symbol}] Risk Adjustment: Tier={tier_info.get('tier')}, "
-                f"Allocation={float(allocation_pct) * 100:.0f}%, "
+                f"LevelRatio={level_ratio:.0%}, "
                 f"OrderSize: {float(base_order_size)} -> {float(adjusted_size):.2f}"
             )
             return adjusted_size
@@ -257,20 +258,21 @@ class GridOrchestrator:
 
     async def _calculate_grid_parameters(self) -> Tuple[int, int, Decimal]:
         """
-        Calculate realistic grid parameters based on allocated capital.
+        Calculate grid parameters based on capital, tier, and leverage using the new v2 model.
 
-        Formula:
-            allocated_margin = capital × tier_allocation
-            margin_per_level = min_notional / leverage
-            max_levels = allocated_margin / margin_per_level
+        Uses PositionSizer.calculate_grid_params() for grid sizing.
 
         Returns:
             Tuple[int, int, Decimal]: (levels_up, levels_down, order_size)
 
         Raises:
-            InsufficientGridCapital: If capital cannot support minimum grid (2 levels)
+            InsufficientGridCapital: If capital cannot support minimum grid
         """
+        from bot_v2.risk.adaptive_risk_manager import PositionSizer
+        from bot_v2.models.exceptions import InsufficientCapitalError
+
         if not self.capital_manager or not self.risk_manager:
+            # Fallback: use config values without capital constraint
             order_size = Decimal(
                 str(getattr(self.config, "grid_order_size_quote", 100))
             )
@@ -289,72 +291,52 @@ class GridOrchestrator:
                 f"[{self.symbol}] Capital is ${capital:.2f} - cannot deploy grid"
             )
 
+        # Get tier and configuration
         tier_info = self.risk_manager.get_tier_info(self.symbol)
-        allocation_pct = Decimal(str(tier_info.get("capital_allocation", 1.0)))
+        tier_name = tier_info.get("tier", "PROBATION")
 
-        # New leverage calculation: strategy config leverage × tier multiplier
+        # Get the RiskTier object
+        from bot_v2.risk.adaptive_risk_manager import ALL_TIERS
+
+        tier = next((t for t in ALL_TIERS if t.name == tier_name), ALL_TIERS[-1])
+
+        # Get grid configuration
+        configured_up = int(getattr(self.config, "grid_num_grids_up", 25))
+        configured_down = int(getattr(self.config, "grid_num_grids_down", 25))
         strategy_leverage = float(getattr(self.config, "leverage", 5))
-        leverage_multiplier = tier_info.get("leverage_multiplier", 1.0)
-        max_leverage_cap = tier_info.get("max_leverage_cap", 20)
 
-        # Calculate leverage: strategy × multiplier, capped
-        calculated_leverage = strategy_leverage * leverage_multiplier
-        leverage = min(int(round(calculated_leverage)), max_leverage_cap)
-        leverage = max(1, leverage)  # Minimum 1x
-        leverage = Decimal(leverage)
+        # Get min/max order size from settings or environment
+        min_order_size = float(getattr(self.config, "min_order_size_usd", 5.0))
+        max_order_size = float(getattr(self.config, "max_order_size_usd", 100.0))
+        min_grid_levels = int(getattr(self.config, "min_grid_levels", 10))
 
-        # Check for explicit grid_leverage override in config
-        grid_leverage = getattr(self.config, "grid_leverage", None)
-        if grid_leverage is not None:
-            try:
-                leverage = Decimal(str(grid_leverage))
-            except Exception:
-                pass  # Keep calculated leverage if conversion fails
-
-        allocated_margin = capital * allocation_pct
-
-        min_notional = Decimal(os.getenv("BOT_MIN_NOTIONAL_USD", "5.0"))
-
-        margin_per_level = min_notional / leverage
-
-        max_levels = int(allocated_margin / margin_per_level)
-
-        if max_levels < 2:
-            required_capital = (2 * margin_per_level) / allocation_pct
-            raise InsufficientGridCapital(
-                f"[{self.symbol}] Insufficient capital for grid deployment. "
-                f"Available: ${capital:.2f}, Allocated: ${allocated_margin:.2f}, "
-                f"Min notional: ${min_notional:.2f}, Leverage: {leverage}x. "
-                f"Need minimum ${required_capital:.2f} capital for 2-level grid."
+        # Calculate grid parameters using new v2 logic
+        try:
+            result = PositionSizer.calculate_grid_params(
+                capital=float(capital),
+                tier=tier,
+                configured_up=configured_up,
+                configured_down=configured_down,
+                base_leverage=strategy_leverage,
+                min_order_size_usd=min_order_size,
+                max_order_size_usd=max_order_size,
+                min_grid_levels=min_grid_levels,
             )
 
-        config_up = int(getattr(self.config, "grid_num_grids_up", 25))
-        config_down = int(getattr(self.config, "grid_num_grids_down", 25))
-        config_total = config_up + config_down
+            levels_up = result["levels_up"]
+            levels_down = result["levels_down"]
+            order_size = Decimal(str(result["order_size_quote"]))
 
-        if max_levels < config_total:
-            actual_up = max_levels // 2 + (max_levels % 2)
-            actual_down = max_levels // 2
-            logger.warning(
-                f"[{self.symbol}] Grid levels reduced from {config_up}+{config_down} to "
-                f"{actual_up}+{actual_down} due to capital constraints. "
-                f"Capital: ${capital:.2f}, Allocation: {allocation_pct * 100:.0f}%, "
-                f"Margin available: ${allocated_margin:.2f}, Max levels: {max_levels}. "
-                f"Leverage: {strategy_leverage}x (config) × {leverage_multiplier}x (tier) = {leverage}x"
+            logger.info(
+                f"[{self.symbol}] Grid v2 params: {levels_up} up + {levels_down} down @ ${result['order_size_quote']}/order, "
+                f"notional ${result['notional_capital']}, leverage {result['effective_leverage']}x, "
+                f"tier={tier_name} ratio={result['level_allocation_ratio']:.0%}"
             )
-            levels_up, levels_down = actual_up, actual_down
-        else:
-            levels_up, levels_down = config_up, config_down
 
-        order_size = min_notional
+            return (levels_up, levels_down, order_size)
 
-        logger.info(
-            f"[{self.symbol}] Grid parameters: {levels_up} up + {levels_down} down @ ${order_size:.2f}/order. "
-            f"Capital: ${capital:.2f}, Allocation: {allocation_pct * 100:.0f}%, Leverage: {leverage}x, "
-            f"Margin per level: ${margin_per_level:.2f}, Max levels: {max_levels}"
-        )
-
-        return (levels_up, levels_down, order_size)
+        except InsufficientCapitalError as e:
+            raise InsufficientGridCapital(str(e))
 
     async def start(self, persisted_state: Optional[GridState] = None):
         """Start the grid session.

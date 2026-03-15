@@ -232,7 +232,8 @@ class AdaptiveRiskIntegration:
             tier_info = self.get_tier_info(symbol)
             tiers_status[symbol] = {
                 "tier": tier_info.get("tier", "UNKNOWN"),
-                "allocation_pct": tier_info.get("capital_allocation", 0),
+                "allocation_pct": tier_info.get("level_allocation_ratio", 0)
+                * 100,  # Convert to percentage for backwards compat
                 "leverage": tier_info.get("leverage_multiplier", 1),
                 "kill_switch_active": tier_info.get("kill_switch_active", False),
             }

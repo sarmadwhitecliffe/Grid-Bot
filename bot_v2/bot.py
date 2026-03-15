@@ -1365,7 +1365,11 @@ class TradingBot:
 
         # Use adaptive risk allocation and leverage (tier-based)
         tier_name = adaptive_params["tier"]
-        capital_allocation_pct = Decimal(str(adaptive_params["capital_allocation_pct"]))
+        # Use level_allocation_ratio for grid sizing (convert to percentage for display)
+        level_ratio = adaptive_params.get("level_allocation_ratio", 1.0)
+        capital_allocation_pct = Decimal(
+            str(level_ratio * 100)
+        )  # Convert ratio to percentage for display
         leverage = Decimal(str(adaptive_params["leverage"]))
         tier_max_leverage = adaptive_params.get("tier_max_leverage", leverage)
         kelly_reason = adaptive_params.get("kelly_reason", "")
@@ -1384,13 +1388,13 @@ class TradingBot:
         leverage_info = f"{leverage}x leverage (Kelly, max {tier_max_leverage}x)"
         logger.info(
             f"[{symbol}] Adaptive Risk: {tier_name} tier - "
-            f"{capital_allocation_pct:.1f}% allocation @ {leverage_info}"
+            f"{level_ratio:.0%} level ratio @ {leverage_info}"
         )
         if kelly_reason:
             logger.info(f"[{symbol}] {kelly_reason}")
 
         # Calculate position size using adaptive risk parameters
-        notional = capital * (capital_allocation_pct / Decimal("100")) * leverage
+        notional = capital * (Decimal(str(level_ratio))) * leverage
         # Second trade leverage override (raise to tier max if qualified)
         try:
             # Load dedicated feature config (new location)
@@ -1422,7 +1426,7 @@ class TradingBot:
             )
             logger.debug(f"[{symbol}] post_override_leverage {leverage}x")
             # Recompute notional if leverage changed
-            notional = capital * (capital_allocation_pct / Decimal("100")) * leverage
+            notional = capital * Decimal(str(level_ratio)) * leverage
         except Exception as e:
             logger.error(
                 f"[{symbol}] Failed applying second trade leverage override: {e}"
@@ -1646,7 +1650,7 @@ class TradingBot:
                 tp1_price=tp1_price,
                 leverage=leverage,
                 tier_name=tier_name,
-                capital_allocation_pct=capital_allocation_pct,
+                capital_allocation_pct=capital_allocation_pct,  # Already converted from level_ratio
             )
 
             # Store position
@@ -3990,8 +3994,8 @@ class TradingBot:
                             "sharpe_ratio": getattr(metrics, "sharpe_ratio", 0),
                             "win_rate": metrics.win_rate,
                         },
-                        "capital_allocation": tier.capital_allocation,
-                        "max_leverage": tier.max_leverage,
+                        "level_allocation_ratio": tier.level_allocation_ratio,
+                        "max_leverage_cap": tier.max_leverage_cap,
                     }
                     await self._send_tier_notification(
                         symbol, old_tier_name, tier.name, tier_info
@@ -4070,8 +4074,8 @@ class TradingBot:
             is_promotion = new_idx > old_idx
 
             # Get new tier allocation and leverage
-            capital_alloc = tier_info.get("capital_allocation", 0) * 100
-            max_leverage = tier_info.get("max_leverage", 1)
+            level_ratio = tier_info.get("level_allocation_ratio", 1.0)
+            max_leverage = tier_info.get("max_leverage_cap", 20)
 
             # Create notification message
             if is_promotion:

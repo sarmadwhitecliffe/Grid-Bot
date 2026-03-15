@@ -51,10 +51,9 @@ def test_profit_factor_max_exclusive_boundary_meets_criteria():
         win_rate_min=0.40,
         max_drawdown_max=0.25,
         consecutive_losses_max=None,
-        capital_allocation=0.40,
-        min_leverage=1,
-        max_leverage=5,
-        max_position_size_usd=3000,
+        level_allocation_ratio=0.80,
+        leverage_multiplier=1.0,
+        max_leverage_cap=20,
         description="Test tier",
     )
 
@@ -91,10 +90,9 @@ def test_max_trades_exclusive_boundary():
         win_rate_min=None,
         max_drawdown_max=None,
         consecutive_losses_max=None,
-        capital_allocation=0.10,
-        min_leverage=1,
-        max_leverage=2,
-        max_position_size_usd=500,
+        level_allocation_ratio=0.50,
+        leverage_multiplier=0.5,
+        max_leverage_cap=10,
         description="Test probation",
     )
 

@@ -79,13 +79,25 @@ class GridBotSettings(BaseSettings):
     MAX_DRAWDOWN_PCT: float = Field(
         0.15, description="Emergency close at 15% equity drop"
     )
-    TAKE_PROFIT_PCT: float = Field(0.30, description="Lock profits at 30% cumulative gain")
+    TAKE_PROFIT_PCT: float = Field(
+        0.30, description="Lock profits at 30% cumulative gain"
+    )
     ADX_THRESHOLD: int = Field(25, description="Pause bot if ADX exceeds this value")
     bb_width_threshold: float = Field(
         0.04, description="Pause bot if BB width exceeds this value"
     )
     RECENTRE_TRIGGER: int = Field(3, description="Re-centre if price drifts > N levels")
     FUNDING_INTERVAL_HOURS: int = Field(8, description="Hours between funding payments")
+
+    # --- Grid Sizing (v2) ---
+    MIN_ORDER_SIZE_USD: float = Field(
+        5.0, description="Minimum notional per order (exchange requirement)"
+    )
+    MAX_ORDER_SIZE_USD: float = Field(
+        100.0,
+        description="Maximum notional per order (cap to prevent oversized orders)",
+    )
+    MIN_GRID_LEVELS: int = Field(10, description="Minimum grid levels to maintain")
 
     # --- Timing ---
     POLL_INTERVAL_SEC: int = Field(

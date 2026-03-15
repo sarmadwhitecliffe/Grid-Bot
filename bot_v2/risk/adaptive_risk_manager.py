@@ -44,10 +44,11 @@ class RiskTier:
     win_rate_min: Optional[float]
     max_drawdown_max: Optional[float]
     consecutive_losses_max: Optional[int]
-    capital_allocation: float
+    level_allocation_ratio: (
+        float  # Fraction of configured grid levels to activate (0.0-1.0)
+    )
     leverage_multiplier: float  # Multiplier applied to strategy_config leverage
     max_leverage_cap: int  # Hard cap on maximum leverage for safety
-    max_position_size_usd: Optional[int]
     description: str
 
 
@@ -150,7 +151,7 @@ def load_risk_tiers_from_config(
                 "name",
                 "min_trades",
                 "min_profit_factor",
-                "capital_allocation_pct",
+                "level_allocation_ratio",
                 "leverage_multiplier",
             ]
             missing = [f for f in required_fields if f not in tier_config]
@@ -163,10 +164,10 @@ def load_risk_tiers_from_config(
                     f"Tier {tier_config['name']}: leverage_multiplier must be > 0, got {tier_config['leverage_multiplier']}"
                 )
 
-            if not (0 <= tier_config["capital_allocation_pct"] <= 100):
+            if not (0.0 <= tier_config["level_allocation_ratio"] <= 1.0):
                 raise ValueError(
-                    f"Tier {tier_config['name']}: capital_allocation_pct must be 0-100, "
-                    f"got {tier_config['capital_allocation_pct']}"
+                    f"Tier {tier_config['name']}: level_allocation_ratio must be 0.0-1.0, "
+                    f"got {tier_config['level_allocation_ratio']}"
                 )
 
             if tier_config["min_trades"] < 0:
@@ -179,17 +180,6 @@ def load_risk_tiers_from_config(
                     f"Tier {tier_config['name']}: min_profit_factor must be >= 0, "
                     f"got {tier_config['min_profit_factor']}"
                 )
-
-            # Validate optional fields if present
-            if (
-                "max_position_size_usd" in tier_config
-                and tier_config["max_position_size_usd"] is not None
-            ):
-                if tier_config["max_position_size_usd"] <= 0:
-                    raise ValueError(
-                        f"Tier {tier_config['name']}: max_position_size_usd must be > 0 if specified, "
-                        f"got {tier_config['max_position_size_usd']}"
-                    )
 
             # Coerce nullable fields to safe defaults
             min_sharpe_raw = tier_config.get("min_sharpe_ratio", -999)
@@ -206,10 +196,9 @@ def load_risk_tiers_from_config(
                 win_rate_min=tier_config.get("min_win_rate"),
                 max_drawdown_max=tier_config.get("max_drawdown"),
                 consecutive_losses_max=tier_config.get("max_consecutive_losses"),
-                capital_allocation=tier_config["capital_allocation_pct"] / 100.0,
+                level_allocation_ratio=tier_config["level_allocation_ratio"],
                 leverage_multiplier=tier_config.get("leverage_multiplier", 1.0),
                 max_leverage_cap=tier_config.get("max_leverage_cap", 20),
-                max_position_size_usd=tier_config.get("max_position_size_usd"),
                 description=tier_config["description"],
             )
             tiers.append(tier)
@@ -227,11 +216,11 @@ def load_risk_tiers_from_config(
                 t for t in tiers if t.name not in {ti.name for ti in tiers_sorted}
             ]
             tiers_sorted.extend(
-                sorted(remaining, key=lambda t: t.capital_allocation, reverse=True)
+                sorted(remaining, key=lambda t: t.level_allocation_ratio, reverse=True)
             )
         else:
             tiers_sorted = sorted(
-                tiers, key=lambda t: t.capital_allocation, reverse=True
+                tiers, key=lambda t: t.level_allocation_ratio, reverse=True
             )
 
         # Validate tier ordering makes sense
@@ -251,7 +240,7 @@ def load_risk_tiers_from_config(
         )
         for tier in tiers_sorted:
             logger.info(
-                f"  {tier.name}: {tier.capital_allocation * 100:.0f}% capital @ {tier.leverage_multiplier}x leverage "
+                f"  {tier.name}: {tier.level_allocation_ratio:.0%} level ratio @ {tier.leverage_multiplier}x leverage "
                 f"({tier.min_trades}+ trades, PF>{tier.profit_factor_min:.1f})"
             )
 
@@ -278,66 +267,62 @@ def get_default_tiers() -> List[RiskTier]:
     PROBATION = RiskTier(
         "PROBATION",
         0,
-        14,
+        None,
         0.0,
         None,
         -999,
         None,
         None,
         None,
-        0.10,
-        1,
-        2,
-        500,
-        "Learning phase",
+        0.50,
+        0.5,
+        10,
+        "Learning phase - sparse grid density",
     )
     CONSERVATIVE = RiskTier(
         "CONSERVATIVE",
         15,
         None,
         0.8,
-        1.19,
+        None,
         -0.5,
         0.35,
         None,
         None,
-        0.20,
-        1,
-        3,
-        1000,
-        "Underperforming",
+        0.65,
+        0.7,
+        15,
+        "Underperforming - moderate grid density",
     )
     STANDARD = RiskTier(
         "STANDARD",
         15,
         None,
         1.2,
-        1.49,
+        None,
         0.5,
         0.40,
         0.25,
         None,
-        0.40,
-        1,
-        5,
-        3000,
-        "Solid performance",
+        0.80,
+        1.0,
+        20,
+        "Solid performance - near-full grid density",
     )
     AGGRESSIVE = RiskTier(
         "AGGRESSIVE",
         30,
         None,
         1.5,
-        1.99,
+        None,
         1.0,
         0.45,
         0.15,
         5,
-        0.60,
-        1,
-        7,
-        5000,
-        "Proven performer",
+        0.90,
+        1.0,
+        25,
+        "Proven performer - high grid density",
     )
     CHAMPION = RiskTier(
         "CHAMPION",
@@ -349,11 +334,10 @@ def get_default_tiers() -> List[RiskTier]:
         0.50,
         0.12,
         3,
-        0.80,
-        1,
-        8,
-        10000,
-        "Elite performance",
+        1.00,
+        1.2,
+        30,
+        "Elite performance - full grid density",
     )
     return [CHAMPION, AGGRESSIVE, STANDARD, CONSERVATIVE, PROBATION]
 
@@ -938,7 +922,9 @@ class PositionSizer:
         atr: float,
         strategy_leverage: float = 5.0,
     ) -> Dict[str, Any]:
-        base_allocation = capital * tier.capital_allocation
+        # For grid-based system, use level_allocation_ratio to determine position sizing
+        # This is kept for backwards compatibility with single-position mode
+        base_allocation = capital * tier.level_allocation_ratio
         dd_multiplier = PositionSizer._calculate_drawdown_multiplier(metrics, tier.name)
         adjusted_allocation = base_allocation * dd_multiplier
 
@@ -952,9 +938,6 @@ class PositionSizer:
 
         notional = adjusted_allocation * final_leverage
         position_size = notional / current_price if current_price > 0 else 0.0
-        if tier.max_position_size_usd and notional > tier.max_position_size_usd:
-            notional = tier.max_position_size_usd
-            position_size = notional / current_price if current_price > 0 else 0.0
 
         # Determine leverage source for transparency
         leverage_reason = (
@@ -965,7 +948,7 @@ class PositionSizer:
         return {
             "allowed": True,
             "tier": tier.name,
-            "capital_allocation_pct": tier.capital_allocation * 100,
+            "level_allocation_ratio": tier.level_allocation_ratio,
             "leverage": final_leverage,
             "notional": notional,
             "position_size": position_size,
@@ -975,7 +958,105 @@ class PositionSizer:
             "tier_leverage_multiplier": tier.leverage_multiplier,
             "max_leverage_cap": tier.max_leverage_cap,
             "leverage_reason": leverage_reason,
-            "reasoning": f"{tier.name} tier: {tier.capital_allocation * 100}% capital @ {final_leverage}x leverage",
+            "reasoning": f"{tier.name} tier: {tier.level_allocation_ratio:.0%} level ratio @ {final_leverage}x leverage",
+        }
+
+    @staticmethod
+    def calculate_grid_params(
+        capital: float,
+        tier: RiskTier,
+        configured_up: int,
+        configured_down: int,
+        base_leverage: float,
+        min_order_size_usd: float = 5.0,
+        max_order_size_usd: float = 100.0,
+        min_grid_levels: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Calculate grid parameters based on capital, tier, and leverage.
+
+        Formula:
+            effective_leverage = min(base_leverage × tier.multiplier, tier.max_cap)
+            notional_capital = capital × effective_leverage
+            active_levels = round_to_even(configured × tier.ratio)
+            order_size = min(notional_capital / active_levels, max_order_size)
+
+        Args:
+            capital: Available margin capital (USDT)
+            tier: RiskTier with level_allocation_ratio and leverage settings
+            configured_up: Number of grid levels above centre
+            configured_down: Number of grid levels below centre
+            base_leverage: Base leverage from strategy config
+            min_order_size_usd: Minimum notional per order (default $5)
+            max_order_size_usd: Maximum notional per order (default $100)
+            min_grid_levels: Minimum active levels to maintain (default 10)
+
+        Returns:
+            Dict with: levels_up, levels_down, active_levels, order_size_quote,
+                       effective_leverage, notional_capital, level_allocation_ratio
+
+        Raises:
+            InsufficientCapitalError: If capital insufficient for minimum grid
+        """
+        import math
+        from bot_v2.models.exceptions import InsufficientCapitalError
+
+        # Calculate effective leverage
+        effective_leverage = base_leverage * tier.leverage_multiplier
+        effective_leverage = min(effective_leverage, float(tier.max_leverage_cap))
+        effective_leverage = max(1.0, effective_leverage)
+
+        # Calculate notional capital
+        notional_capital = capital * effective_leverage
+
+        # Check minimum capital requirement
+        min_required_capital = min_grid_levels * min_order_size_usd / effective_leverage
+        if capital < min_required_capital:
+            raise InsufficientCapitalError(
+                f"Capital ${capital:.2f} insufficient. "
+                f"Minimum required: ${min_required_capital:.2f} "
+                f"({min_grid_levels} levels @ ${min_order_size_usd}/level, {effective_leverage:.1f}x leverage)"
+            )
+
+        # Calculate total configured levels
+        total_configured = configured_up + configured_down
+
+        # Calculate desired total based on tier ratio
+        desired_total = math.floor(total_configured * tier.level_allocation_ratio)
+
+        # Round down to even for symmetric grid
+        active_total = desired_total - (desired_total % 2)
+        active_total = max(2, active_total)  # Minimum 2 (1 up + 1 down)
+
+        # Cap by capital and configured levels
+        max_by_capital = math.floor(notional_capital / min_order_size_usd)
+        active_total = min(active_total, max_by_capital)
+        active_total = max(min_grid_levels, active_total)
+        active_total = min(active_total, total_configured)
+
+        # Symmetric split (even number guarantees equal up/down)
+        levels_up = active_total // 2
+        levels_down = active_total // 2
+
+        # Calculate order size with max cap
+        order_size_quote = notional_capital / active_total
+        order_size_quote = min(order_size_quote, max_order_size_usd)
+        order_size_quote = max(order_size_quote, min_order_size_usd)
+
+        logger.info(
+            f"Grid params for {tier.name}: {levels_up} up + {levels_down} down @ ${order_size_quote:.2f}/order, "
+            f"notional ${notional_capital:.2f}, leverage {effective_leverage:.1f}x"
+        )
+
+        return {
+            "tier": tier.name,
+            "levels_up": levels_up,
+            "levels_down": levels_down,
+            "active_levels": active_total,
+            "order_size_quote": round(order_size_quote, 2),
+            "effective_leverage": round(effective_leverage, 1),
+            "notional_capital": round(notional_capital, 2),
+            "level_allocation_ratio": tier.level_allocation_ratio,
         }
 
     @staticmethod
@@ -1376,7 +1457,7 @@ class AdaptiveRiskManager:
 
         return {
             "tier": tier.name,
-            "capital_allocation": tier.capital_allocation,
+            "level_allocation_ratio": tier.level_allocation_ratio,
             "leverage_multiplier": tier.leverage_multiplier,
             "max_leverage_cap": tier.max_leverage_cap,
             "description": tier.description,

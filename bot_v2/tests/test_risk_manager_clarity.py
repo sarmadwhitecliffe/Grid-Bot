@@ -58,10 +58,9 @@ def test_demotion_consecutive_losses_only(mock_logger):
         win_rate_min=0.0,
         max_drawdown_max=None,
         consecutive_losses_max=3,
-        capital_allocation=0.5,
-        min_leverage=1,
-        max_leverage=5,
-        max_position_size_usd=None,
+        level_allocation_ratio=0.80,
+        leverage_multiplier=1.0,
+        max_leverage_cap=20,
         description="Test",
     )
 
@@ -103,10 +102,9 @@ def test_buffer_demotion_pf(mock_logger):
             win_rate_min=0.0,
             max_drawdown_max=None,
             consecutive_losses_max=None,
-            capital_allocation=0.5,
-            min_leverage=1,
-            max_leverage=5,
-            max_position_size_usd=None,
+            level_allocation_ratio=0.80,
+            leverage_multiplier=1.0,
+            max_leverage_cap=20,
             description="High",
         )
 
@@ -121,10 +119,9 @@ def test_buffer_demotion_pf(mock_logger):
             win_rate_min=0.0,
             max_drawdown_max=None,
             consecutive_losses_max=None,
-            capital_allocation=0.2,
-            min_leverage=1,
-            max_leverage=5,
-            max_position_size_usd=None,
+            level_allocation_ratio=0.50,
+            leverage_multiplier=0.5,
+            max_leverage_cap=10,
             description="Low",
         )
 
@@ -181,10 +178,9 @@ def test_pf_stability_gating_logging(mock_logger):
             win_rate_min=0.0,
             max_drawdown_max=None,
             consecutive_losses_max=None,
-            capital_allocation=0.5,
-            min_leverage=1,
-            max_leverage=5,
-            max_position_size_usd=None,
+            level_allocation_ratio=0.80,
+            leverage_multiplier=1.0,
+            max_leverage_cap=20,
             description="High",
         )
 
