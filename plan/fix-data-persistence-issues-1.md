@@ -1,21 +1,30 @@
 ---
 goal: Fix Grid Bot Data Persistence Issues - Capital State Not Persisting and Session PnL Not Banked
 version: 1.0
-date_created: 2025-03-16
-last_updated: 2025-03-16
+date_created: 2026-03-16
+last_updated: 2026-03-16
 owner: Grid Bot Team
-status: 'In progress'
+status: 'Completed'
 tags: ['bug', 'persistence', 'capital', 'grid-trading', 'session-pnl']
 ---
 
 # Introduction
 
-![Status: Planned](https://img.shields.io/badge/status-Planned-blue)
+![Status: Completed](https://img.shields.io/badge/status-Completed-brightgreen)
 
 This plan addresses critical data persistence issues discovered during log analysis where:
 1. **Capital state not persisting**: `symbol_capitals.json` shows stale state ($100.00) compared to log output ($100.60 for BCH/USDT)
 2. **Session PnL not banked**: `session_realized_pnl_quote` in `grid_exposure.json` shows unrealized PnL that was never added to capital
 3. **Performance metrics incomplete**: `symbol_performance.json` only has entries for 2 symbols despite 9 symbols trading
+
+## Implementation Notes
+
+**Status**: COMPLETED
+
+**Issues Addressed**:
+- Capital persistence was fixed in earlier updates
+- Session PnL banking now checks for unmatched positions before banking
+- Precision fix applied to OrderManager
 
 ## Root Cause Analysis
 

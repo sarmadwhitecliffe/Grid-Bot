@@ -10,9 +10,17 @@ tags: [bug, high, startup, recovery, exchange]
 
 # Introduction
 
-![Status: Planned](https://img.shields.io/badge/status-Planned-blue)
+![Status: Completed](https://img.shields.io/badge/status-Completed-brightgreen)
 
 This plan addresses DEFECT-3 from the QA assessment: After bot restart, restored state may diverge from exchange state. Orders marked OPEN locally may be filled/canceled on exchange, leading to missing fills and incorrect position tracking.
+
+## Implementation Notes
+
+**Status**: COMPLETED (2026-03-16)
+
+**Implementation Notes**: 
+- Implementation in src/ (`src/oms/reconciler.py`)
+- bot_v2 has `OrderStateManager.reconcile_orders()`
 
 ## 1. Requirements & Constraints
 

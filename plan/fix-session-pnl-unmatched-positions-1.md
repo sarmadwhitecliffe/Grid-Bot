@@ -1,18 +1,26 @@
 ---
 goal: Fix Session PnL Banking with Unmatched Open Positions
 version: 1.0
-date_created: 2025-03-16
-last_updated: 2025-03-16
+date_created: 2026-03-16
+last_updated: 2026-03-16
 owner: Grid Bot Team
-status: 'In progress'
+status: 'Completed'
 tags: ['bug', 'persistence', 'grid-trading', 'session-pnl', 'open-positions']
 ---
 
 # Introduction
 
-![Status: Planned](https://img.shields.io/badge/status-Planned-blue)
+![Status: Completed](https://img.shields.io/badge/status-Completed-brightgreen)
 
 This plan fixes a critical bug where session PnL is banked to capital even when there are unmatched open positions (LONG or SHORT lots) that haven't been closed. This creates "phantom profits" that inflate capital incorrectly.
+
+## Implementation Notes
+
+**Status**: COMPLETED
+
+**Implementation**: 
+- `bot_v2/grid/orchestrator.py` has `_bank_session_pnl()` which checks `_has_unmatched_positions()` before banking
+- Session PnL is deferred if open positions exist
 
 ## Problem Description
 

@@ -9,6 +9,7 @@ grid_config.yaml. Uses Pydantic BaseSettings for validation.
 Precedence: ENV vars > grid_config.yaml defaults.
 """
 
+import os
 import yaml
 from pathlib import Path
 from typing import Optional
@@ -47,6 +48,12 @@ class GridBotSettings(BaseSettings):
     MARKET_TYPE: str = Field("spot", description="'spot' or 'futures'")
     API_KEY: str = Field("test_api_key", description="Exchange API Key")
     API_SECRET: str = Field("test_api_secret", description="Exchange API Secret")
+    FUTURES_API_KEY: str = Field(
+        "", description="Futures API Key (overrides API_KEY for futures)"
+    )
+    FUTURES_API_SECRET: str = Field(
+        "", description="Futures API Secret (overrides API_SECRET for futures)"
+    )
     TESTNET: bool = Field(False, description="Use exchange testnet/sandbox if True")
     SYMBOL: str = Field("BTC/USDT", description="Trading pair")
 
@@ -151,12 +158,22 @@ def get_settings() -> GridBotSettings:
     Return a fully validated settings instance.
 
     Merges YAML defaults with environment variable overrides.
+    Also syncs relevant settings to os.environ for compatibility
+    with code that uses os.getenv() directly.
 
     Returns:
         GridBotSettings: Validated, fully populated settings object.
     """
     yaml_defaults = load_yaml_config()
-    return GridBotSettings(**yaml_defaults)
+    settings_obj = GridBotSettings(**yaml_defaults)
+
+    # Sync to os.environ for compatibility with os.getenv() callers
+    if settings_obj.FUTURES_API_KEY:
+        os.environ["FUTURES_API_KEY"] = settings_obj.FUTURES_API_KEY
+    if settings_obj.FUTURES_API_SECRET:
+        os.environ["FUTURES_API_SECRET"] = settings_obj.FUTURES_API_SECRET
+
+    return settings_obj
 
 
 # Module-level singleton — import this in all other modules.

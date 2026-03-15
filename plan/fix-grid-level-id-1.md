@@ -10,9 +10,23 @@ tags: [bug, medium, order-record, grid-tracker, audit]
 
 # Introduction
 
-![Status: Planned](https://img.shields.io/badge/status-Planned-blue)
+![Status: Completed](https://img.shields.io/badge/status-Completed-brightgreen)
 
 This plan addresses DEFECT-6 from the QA assessment: `OrderRecord` has no `grid_level_id` field. `GridLevel` has `level_index` but it's not preserved in order tracking, making it impossible to trace which grid level an order belongs to or understand the grid structure from order history.
+
+## Implementation Notes
+
+**Status**: COMPLETED (2026-03-16)
+
+**Implementation Location**: bot_v2 (not src/)
+- `bot_v2/grid/orchestrator.py` - Added `level_index` to initial grid orders in `deploy_grid()`
+- `bot_v2/grid/orchestrator.py` - Added `level_index` to counter-order metadata
+- `bot_v2/grid/orchestrator.py` - Added `grid_level_id` to fill_event in `handle_fill()`
+
+**Key Changes**:
+1. Initial grid orders include `level_index` in params
+2. Counter-orders track `level_index` (original +1 or -1)
+3. Fill events include `grid_level_id` for traceability
 
 ## 1. Requirements & Constraints
 

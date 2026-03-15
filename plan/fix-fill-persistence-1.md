@@ -10,9 +10,18 @@ tags: [bug, critical, persistence, fill-handler]
 
 # Introduction
 
-![Status: Planned](https://img.shields.io/badge/status-Planned-blue)
+![Status: Completed](https://img.shields.io/badge/status-Completed-brightgreen)
 
 This plan addresses DEFECT-1 from the QA assessment: Fills are detected in-memory and immediately mutated to FILLED status, but no persistent record is written. On crash or restart, filled orders appear as OPEN in restored state, leading to duplicate positions when counter-orders are placed.
+
+## Implementation Notes
+
+**Status**: COMPLETED (2026-03-16)
+
+**Implementation Notes**: 
+- Primary implementation in src/ (`src/oms/fill_handler.py`, `src/persistence/fill_logger.py`)
+- bot_v2 uses `on_grid_fill` callback for fill logging
+- Fill events now include `grid_level_id` and `parent_order_id` for traceability
 
 ## 1. Requirements & Constraints
 

@@ -30,6 +30,9 @@ from bot_v2.utils.logging_config import setup_logging
 setup_logging()
 logger = logging.getLogger("WebhookServer")
 
+# --- Load .env via config.settings (must be before any TradingBot instantiation) ---
+from config.settings import settings  # noqa: E402
+
 # --- Bot Module Import ---
 try:
     from bot_v2.bot import TradingBot

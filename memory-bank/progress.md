@@ -73,6 +73,36 @@ post_date: "2026-03-14"
   - PROBATION: 10 × 0.5 = 5x
   - CHAMPION: 10 × 1.2 = 12x
 
+### 6. QA Assessment Fixes (2026-03-16)
+Based on log analysis of ~50min runtime (1,858 orders, 1,416 fills, $100→$171.54):
+
+#### 6a. Order Pruning (CRITICAL)
+- **Problem**: 0 CANCELED orders - FILLED orders never pruned, prune interval was 6 HOURS
+- **Solution**: Changed prune interval from 21600s → 300s (5 min), added fill-based pruning (every 100 fills)
+- **Files Changed**:
+  - `bot_v2/bot.py` - Updated `PRUNE_INTERVAL_SECONDS` and added fill-based pruning threshold
+  - Added `_total_fills_since_last_prune` counter
+
+#### 6b. grid_level_id Tracking (MEDIUM)
+- **Problem**: Fill events had no reference to which grid level triggered them
+- **Solution**: Added `level_index` to initial grid orders, propagated to fill events
+- **Files Changed**:
+  - `bot_v2/grid/orchestrator.py` - Added `level_index` to order params, included in fill_event dict
+
+#### 6c. parent_order_id Tracking (MEDIUM)
+- **Problem**: Counter-orders had no reference to the order that triggered them
+- **Solution**: Added `parent_order_id` to counter-order metadata
+- **Files Changed**:
+  - `bot_v2/grid/orchestrator.py` - Added `parent_order_id` to counter-order metadata
+
+#### 6d. Price/Amount Precision Fix (MEDIUM)
+- **Problem**: Excessive precision (30+ decimal places) in amounts/prices
+- **Solution**: Quantized prices/amounts to exchange precision in OrderManager
+- **Files Changed**:
+  - `bot_v2/execution/order_manager.py` - Added `_get_market_precision()`, `_quantize_price()`, `_quantize_amount()`
+  - Uses exchange market info for price_step/amount_step
+  - Falls back to 0.0001/0.001 if unavailable
+
 ## Remaining to Build
 
 - Test capital-aware grid sizing with live symbols
@@ -85,3 +115,7 @@ post_date: "2026-03-14"
 - Previously: Performance metrics showed wrong equity values (fixed)
 - Previously: Grid stopped after TP and required manual restart (fixed)
 - Previously: Leverage mismatch between backtest and adaptive risk (fixed)
+- Previously: Orders never pruned causing memory buildup (fixed 2026-03-16)
+- Previously: No grid_level_id in fill events (fixed 2026-03-16)
+- Previously: No parent_order_id for counter-orders (fixed 2026-03-16)
+- Previously: Excessive precision in order amounts (fixed 2026-03-16)

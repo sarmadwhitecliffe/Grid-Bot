@@ -10,9 +10,17 @@ tags: [bug, medium, order-record, audit, fill-handler]
 
 # Introduction
 
-![Status: Planned](https://img.shields.io/badge/status-Planned-blue)
+![Status: Completed](https://img.shields.io/badge/status-Completed-brightgreen)
 
 This plan addresses DEFECT-5 from the QA assessment: `OrderRecord` has `filled_price` and `filled_at` fields but they are never populated. This results in no fill price audit trail, making it impossible to verify execution prices or calculate accurate PnL per trade.
+
+## Implementation Notes
+
+**Status**: COMPLETED (2026-03-16)
+
+**Implementation Notes**: 
+- Implementation in src/ (`src/oms/__init__.py`, `src/oms/fill_handler.py`)
+- bot_v2 GridOrchestrator captures fill_price in handle_fill()
 
 ## 1. Requirements & Constraints
 
