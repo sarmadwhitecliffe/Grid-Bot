@@ -50,7 +50,7 @@ class OrderManager:
 
     # ── Placement ─────────────────────────────────────────────────────────────
 
-    async def deploy_grid(self, levels: List[GridLevel]) -> None:
+    async def deploy_grid(self, levels: List[GridLevel]) -> List[str]:
         """
         Place limit orders for all supplied grid levels.
 
@@ -59,7 +59,11 @@ class OrderManager:
 
         Args:
             levels: List of GridLevel objects (output of GridCalculator.calculate).
+
+        Returns:
+            List of placed order IDs.
         """
+        placed_ids = []
         async with self._lock:
             open_count = self._count_open()
             for level in levels:
@@ -81,20 +85,23 @@ class OrderManager:
                         grid_price=level.price,
                         side=level.side,
                         amount=amount,
+                        grid_level_id=level.level_index,
                     )
                     self._orders[result["id"]] = record
                     self._grid_map[level.price] = result["id"]
+                    placed_ids.append(result["id"])
                     open_count += 1
                     logger.info(
-                        "Placed %s limit @ %.4f | ID: %s",
+                        "Placed %s limit @ %.4f | ID: %s | Level: %d",
                         level.side,
                         level.price,
                         result["id"],
+                        level.level_index,
                     )
                 except Exception as exc:
-                    logger.error(
-                        "Failed to place order at %.4f: %s", level.price, exc
-                    )
+                    logger.error("Failed to place order at %.4f: %s", level.price, exc)
+
+        return placed_ids
 
     async def cancel_all_orders(self) -> None:
         """
@@ -193,22 +200,14 @@ class OrderManager:
             state: Dictionary previously produced by export_state().
         """
         for oid, data in state.get("orders", {}).items():
-            rec = OrderRecord(
-                order_id=data["order_id"],
-                grid_price=data["grid_price"],
-                side=data["side"],
-                amount=data["amount"],
-                status=OrderStatus(data["status"]),
-                placed_at=datetime.fromisoformat(data["placed_at"]),
-            )
+            rec = OrderRecord.from_dict(data)
             self._orders[oid] = rec
             if rec.status == OrderStatus.OPEN:
                 self._grid_map[rec.grid_price] = oid
+        logger.info(f"Imported {len(self._orders)} orders from state")
 
     # ── Private ───────────────────────────────────────────────────────────────
 
     def _count_open(self) -> int:
         """Count records with OPEN status (no lock — caller must hold lock)."""
-        return sum(
-            1 for r in self._orders.values() if r.status == OrderStatus.OPEN
-        )
+        return sum(1 for r in self._orders.values() if r.status == OrderStatus.OPEN)

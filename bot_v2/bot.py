@@ -378,7 +378,10 @@ class TradingBot:
         self.last_reconciliation_time = 0.0  # Phase 2: Periodic reconciliation
         self.last_prune_time = 0.0  # Phase 5: State pruning
         self.order_state_prune_interval_sec = int(
-            os.getenv("BOTV2_ORDER_STATE_PRUNE_INTERVAL_SECS", "21600")
+            os.getenv("BOTV2_ORDER_STATE_PRUNE_INTERVAL_SECS", "300")
+        )
+        self.order_state_prune_fills_threshold = int(
+            os.getenv("BOTV2_ORDER_STATE_PRUNE_FILLS_THRESHOLD", "100")
         )
         self._start_time = datetime.now(timezone.utc)  # Track uptime
 
@@ -1020,15 +1023,24 @@ class TradingBot:
                     # Mark as pending - will persist on next tick after debounce period
                     self._pending_persist = True
 
-                # Periodic Maintenance (Pruning every 6 hours)
-                if (
+                # Periodic Maintenance (Pruning every 5 minutes OR every N fills)
+                should_prune_time = (
                     current_time - self.last_prune_time
                     > self.order_state_prune_interval_sec
-                ):
-                    logger.info("Running periodic order state pruning...")
-                    # Run in background to avoid blocking heartbeat
+                )
+                should_prune_fills = (
+                    hasattr(self, "_total_fills_since_last_prune")
+                    and self._total_fills_since_last_prune
+                    >= self.order_state_prune_fills_threshold
+                )
+                if should_prune_time or should_prune_fills:
+                    logger.info(
+                        f"Running periodic order state pruning... "
+                        f"(time_based={should_prune_time}, fills_based={should_prune_fills})"
+                    )
                     asyncio.create_task(self.order_state_manager.prune_archive())
                     self.last_prune_time = current_time
+                    self._total_fills_since_last_prune = 0
 
                 # Memory Maintenance (caches and history cleanup)
                 await self._run_memory_maintenance()
@@ -3044,6 +3056,14 @@ class TradingBot:
         await asyncio.to_thread(
             self.state_manager.append_fill_log_event,
             fill_event,
+        )
+
+        # Track fills for prune triggering
+        if not hasattr(self, "_total_fills_since_last_prune"):
+            self._total_fills_since_last_prune = 0
+        self._total_fills_since_last_prune += 1
+        logger.debug(
+            f"Fill tracked: total_since_prune={self._total_fills_since_last_prune}"
         )
 
     def _on_grid_state_persist(self, symbol: str, state) -> None:

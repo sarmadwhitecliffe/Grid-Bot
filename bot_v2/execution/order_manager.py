@@ -11,7 +11,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -21,6 +21,11 @@ from bot_v2.models.enums import TradeSide
 from bot_v2.models.exceptions import OrderExecutionError
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PRICE_STEP = Decimal("0.0001")
+DEFAULT_AMOUNT_STEP = Decimal("0.001")
+DEFAULT_PRICE_PRECISION = 4
+DEFAULT_AMOUNT_PRECISION = 3
 
 
 class OrderManager:
@@ -60,10 +65,93 @@ class OrderManager:
             self.order_state_manager = OrderStateManager(Path("data_futures"))
 
         # Daily limits tracking (reset at midnight UTC)
-        self._daily_counters: Dict[str, Dict[str, Any]] = (
-            {}
-        )  # symbol -> {date, count, notional}
+        self._daily_counters: Dict[
+            str, Dict[str, Any]
+        ] = {}  # symbol -> {date, count, notional}
         self._last_reset_date = datetime.now(timezone.utc).date()
+        self._market_precision_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _get_market_precision(self, symbol_id: str) -> Dict[str, Any]:
+        """
+        Get price and amount precision for a symbol from exchange market info.
+
+        Returns:
+            Dict with price_step, amount_step, price_precision, amount_precision
+        """
+        if symbol_id in self._market_precision_cache:
+            return self._market_precision_cache[symbol_id]
+
+        try:
+            market_id = self.exchange.format_market_id(symbol_id)
+            if (
+                hasattr(self.exchange, "exchange")
+                and self.exchange.exchange
+                and self.exchange.exchange.markets
+            ):
+                if market_id in self.exchange.exchange.markets:
+                    market = self.exchange.exchange.markets[market_id]
+                    precision = {
+                        "price_step": Decimal(
+                            str(market.get("precision", {}).get("price", 0.0001))
+                        ),
+                        "amount_step": Decimal(
+                            str(market.get("precision", {}).get("amount", 0.001))
+                        ),
+                        "price_precision": market.get("precision", {}).get("price"),
+                        "amount_precision": market.get("precision", {}).get("amount"),
+                    }
+                    self._market_precision_cache[symbol_id] = precision
+                    return precision
+            if (
+                hasattr(self.exchange, "public_exchange")
+                and self.exchange.public_exchange
+                and self.exchange.public_exchange.markets
+            ):
+                if market_id in self.exchange.public_exchange.markets:
+                    market = self.exchange.public_exchange.markets[market_id]
+                    precision = {
+                        "price_step": Decimal(
+                            str(market.get("precision", {}).get("price", 0.0001))
+                        ),
+                        "amount_step": Decimal(
+                            str(market.get("precision", {}).get("amount", 0.001))
+                        ),
+                        "price_precision": market.get("precision", {}).get("price"),
+                        "amount_precision": market.get("precision", {}).get("amount"),
+                    }
+                    self._market_precision_cache[symbol_id] = precision
+                    return precision
+        except Exception as e:
+            logger.debug(f"Could not get market precision for {symbol_id}: {e}")
+
+        default_precision = {
+            "price_step": DEFAULT_PRICE_STEP,
+            "amount_step": DEFAULT_AMOUNT_STEP,
+            "price_precision": DEFAULT_PRICE_PRECISION,
+            "amount_precision": DEFAULT_AMOUNT_PRECISION,
+        }
+        self._market_precision_cache[symbol_id] = default_precision
+        return default_precision
+
+    def _quantize_price(self, price: Decimal, symbol_id: str) -> Decimal:
+        """Quantize price to exchange precision."""
+        precision = self._get_market_precision(symbol_id)
+        price_step = precision["price_step"]
+        if price_step > 0:
+            return (price / price_step).quantize(
+                Decimal("1"), rounding=ROUND_DOWN
+            ) * price_step
+        return price
+
+    def _quantize_amount(self, amount: Decimal, symbol_id: str) -> Decimal:
+        """Quantize amount to exchange precision."""
+        precision = self._get_market_precision(symbol_id)
+        amount_step = precision["amount_step"]
+        if amount_step > 0:
+            return (amount / amount_step).quantize(
+                Decimal("1"), rounding=ROUND_DOWN
+            ) * amount_step
+        return amount
 
     def _reset_daily_counters_if_needed(self) -> None:
         """Reset daily counters if date has changed."""
@@ -191,11 +279,13 @@ class OrderManager:
         price = current_price
         if price is None:
             price = await self.get_current_price(symbol_id)
-        
+
         if price:
             notional = amount * price
         else:
-            logger.warning(f"Could not calculate notional for market order: price missing")
+            logger.warning(
+                f"Could not calculate notional for market order: price missing"
+            )
             notional = Decimal("0")
 
         # Safety checks (for live mode)
@@ -284,8 +374,22 @@ class OrderManager:
         if market_id is None:
             raise OrderExecutionError(f"Invalid symbol: {symbol_id}")
 
-        # Calculate notional value
-        notional = amount * price
+        # Quantize price and amount to exchange precision
+        quantized_price = self._quantize_price(price, symbol_id)
+        quantized_amount = self._quantize_amount(amount, symbol_id)
+
+        if quantized_amount <= Decimal("0"):
+            raise OrderExecutionError(
+                f"Quantized amount too small: {amount} -> {quantized_amount}"
+            )
+
+        logger.debug(
+            f"Quantized order values for {symbol_id}: "
+            f"price {price} -> {quantized_price}, amount {amount} -> {quantized_amount}"
+        )
+
+        # Calculate notional value using quantized values
+        notional = quantized_amount * quantized_price
 
         # Safety checks (for live mode)
         if config and config.mode == "live":
@@ -298,12 +402,12 @@ class OrderManager:
         local_id = f"local_limit_{uuid.uuid4().hex[:8]}"
 
         try:
-            # Execute order through exchange
+            # Execute order through exchange with quantized values
             order = await self.exchange.create_limit_order(
                 market_id=market_id,
                 side=side,
-                amount=amount,
-                price=price,
+                amount=quantized_amount,
+                price=quantized_price,
                 params=params or {},
             )
 
@@ -383,8 +487,12 @@ class OrderManager:
         """
         record = self.order_state_manager.get_order_by_exchange_id(order_id)
         if record:
-            await self.order_state_manager.update_order_status(record.local_id, "CLOSED")
-            logger.debug(f"Cleared tracking for order {order_id} (local_id={record.local_id})")
+            await self.order_state_manager.update_order_status(
+                record.local_id, "CLOSED"
+            )
+            logger.debug(
+                f"Cleared tracking for order {order_id} (local_id={record.local_id})"
+            )
 
     def get_pending_orders(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -403,7 +511,7 @@ class OrderManager:
                     "amount": Decimal(r.quantity),
                     "price": Decimal(r.avg_price) if r.avg_price else Decimal("0"),
                     "local_id": r.local_id,
-                    "grid_id": r.grid_id
+                    "grid_id": r.grid_id,
                 }
         return pending
 
@@ -416,7 +524,9 @@ class OrderManager:
         """
         return self.order_state_manager.get_stats()
 
-    async def cancel_order(self, order_id: str, symbol_id: Optional[str] = None) -> bool:
+    async def cancel_order(
+        self, order_id: str, symbol_id: Optional[str] = None
+    ) -> bool:
         """Cancel a single tracked order if possible.
 
         Returns True when cancellation/cleanup succeeds, False otherwise.
@@ -433,7 +543,10 @@ class OrderManager:
                     else target_symbol
                 )
                 await self.exchange.cancel_order(order_id, market_id)
-            elif hasattr(self.exchange, "exchange") and self.exchange.exchange is not None:
+            elif (
+                hasattr(self.exchange, "exchange")
+                and self.exchange.exchange is not None
+            ):
                 market_id = (
                     self.exchange.format_market_id(target_symbol)
                     if target_symbol
@@ -445,7 +558,9 @@ class OrderManager:
                 self.exchange.open_sim_orders.pop(order_id, None)
 
             if record:
-                await self.order_state_manager.update_order_status(record.local_id, "CANCELLED")
+                await self.order_state_manager.update_order_status(
+                    record.local_id, "CANCELLED"
+                )
 
             logger.info(f"Order cancellation cleanup complete for {order_id}")
             return True
@@ -463,7 +578,7 @@ class OrderManager:
             return 0
 
         order_ids = [r.exchange_order_id for r in open_records if r.exchange_order_id]
-        
+
         results = await asyncio.gather(
             *[self.cancel_order(oid, symbol_id=symbol_id) for oid in order_ids],
             return_exceptions=True,
@@ -473,7 +588,9 @@ class OrderManager:
             if result is True:
                 cancelled += 1
 
-        logger.info(f"Cancelled/cleaned {cancelled}/{len(order_ids)} orders for {symbol_id}")
+        logger.info(
+            f"Cancelled/cleaned {cancelled}/{len(order_ids)} orders for {symbol_id}"
+        )
         return cancelled
 
     async def reconcile_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:

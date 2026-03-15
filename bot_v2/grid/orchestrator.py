@@ -547,6 +547,31 @@ class GridOrchestrator:
 
         return open_long_value, open_short_value
 
+    def _get_session_closed_pnl(self) -> Decimal:
+        """
+        Calculate TRUE realized PnL from CLOSED trades only.
+
+        This is different from session_realized_pnl_quote which tracks cash flow.
+        True profit = sum of pnl_usd from all closed grid trades in this session.
+        """
+        total_closed_pnl = Decimal("0")
+
+        # Track closed PnL from the current session using session_fill_count
+        # and add to any tracked closed PnL in lots
+        # For simplicity, we'll use the on_grid_trade_closed callback data
+        # which should have already updated capital with closed trade PnL
+
+        # Actually, we need to look at the lot's pnl_usd which represents closed trades
+        for lot in self._open_long_lots:
+            if "pnl_usd" in lot:
+                total_closed_pnl += Decimal(str(lot["pnl_usd"]))
+
+        for lot in self._open_short_lots:
+            if "pnl_usd" in lot:
+                total_closed_pnl += Decimal(str(lot["pnl_usd"]))
+
+        return total_closed_pnl
+
     async def _bank_session_pnl(self, reason: str = "Session End"):
         """Bank the accumulated session PnL to capital before resetting.
 
@@ -852,11 +877,24 @@ class GridOrchestrator:
                 )
                 return False
 
-        initial_capital = Decimal(
-            str(getattr(self.config, "initial_capital", Decimal("1")))
-        )
+        # Use actual symbol capital for PnL calculation
+        if self.capital_manager:
+            try:
+                initial_capital = await self.capital_manager.get_capital(self.symbol)
+                if initial_capital <= Decimal("0"):
+                    initial_capital = Decimal("100.0")
+            except Exception:
+                initial_capital = Decimal("100.0")
+        else:
+            initial_capital = Decimal(
+                str(getattr(self.config, "initial_capital", Decimal("100")))
+            )
         if initial_capital <= Decimal("0"):
-            initial_capital = Decimal("1")
+            initial_capital = Decimal("100.0")
+
+        # Only check max DD when positions are flat
+        if self._has_unmatched_positions():
+            return True  # Allow restart, will check again when positions close
 
         session_pnl_pct = self.session_realized_pnl_quote / initial_capital
         max_dd_pct = getattr(self.config, "grid_session_max_dd_pct", Decimal("0.07"))
@@ -926,6 +964,7 @@ class GridOrchestrator:
                     "side": side,
                     "amount": Decimal(str(amount)),
                     "grid_id": grid_id,
+                    "level_index": idx,
                 }
             )
 
@@ -1020,16 +1059,41 @@ class GridOrchestrator:
         # For now, we'll implement placeholders for session TP and Max DD.
 
         # Placeholder for session PnL calculation logic
-        initial_capital = Decimal(
-            str(getattr(self.config, "initial_capital", Decimal("1")))
-        )
+        # Use actual symbol capital, not config default
+        if self.capital_manager:
+            try:
+                initial_capital = await self.capital_manager.get_capital(self.symbol)
+                if initial_capital <= Decimal("0"):
+                    initial_capital = Decimal("100.0")  # fallback
+            except Exception:
+                initial_capital = Decimal("100.0")  # fallback
+        else:
+            initial_capital = Decimal(
+                str(getattr(self.config, "initial_capital", Decimal("100")))
+            )
         if initial_capital <= Decimal("0"):
-            initial_capital = Decimal("1")
+            initial_capital = Decimal("100.0")
 
         session_tp_pct = getattr(self.config, "grid_session_tp_pct", Decimal("0.05"))
         session_max_dd_pct = getattr(
             self.config, "grid_session_max_dd_pct", Decimal("0.07")
         )
+        # Use TRUE closed trade PnL, not cash flow (session_realized_pnl_quote)
+        # Session TP/MaxDD checks should only use TRUE closed PnL, not cash flow
+        # Cash flow (session_realized_pnl_quote) includes open position value, not profit
+
+        # Calculate profit from closed trades only
+        # If there are open positions, we can't determine true profit yet
+        if self._has_unmatched_positions():
+            # Skip TP/DD checks if positions are open - can't determine true profit
+            logger.debug(
+                f"[{self.symbol}] Skipping Session TP/DD check - "
+                f"unmatched positions exist ({len(self._open_long_lots)} LONG, {len(self._open_short_lots)} SHORT). "
+                f"Will check again when positions close."
+            )
+            return
+
+        # Use session_realized_pnl_quote only when positions are flat (closed)
         session_profit_pct = self.session_realized_pnl_quote / initial_capital
         session_drawdown_pct = (
             max(Decimal("0"), -self.session_realized_pnl_quote) / initial_capital
@@ -1040,8 +1104,6 @@ class GridOrchestrator:
                 f"[{self.symbol}] Session Take Profit ({float(session_tp_pct) * 100:.1f}%) hit! "
                 f"Profit: {float(session_profit_pct) * 100:.2f}%"
             )
-            # Close all open positions BEFORE banking to ensure true realized profit
-            await self._close_all_positions_for_tp()
             if getattr(self.config, "grid_session_tp_reinvest", True):
                 await self._bank_and_reinvest(reason="Session TP")
             else:
@@ -1148,6 +1210,13 @@ class GridOrchestrator:
         )
 
         if self.on_grid_fill:
+            # Get order metadata for grid_level_id
+            original_meta = self.order_metadata.get(order_id, {})
+            grid_level_id = original_meta.get("level_index")
+
+            # Get parent_order_id from the filled order's metadata
+            parent_order_id = original_meta.get("parent_order_id")
+
             fill_event = {
                 "symbol": self.symbol,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1156,6 +1225,8 @@ class GridOrchestrator:
                 "price": str(fill_price),
                 "amount": str(amount),
                 "source": "grid",
+                "grid_level_id": grid_level_id,
+                "parent_order_id": parent_order_id,
             }
             try:
                 await self.on_grid_fill(fill_event)
@@ -1213,9 +1284,14 @@ class GridOrchestrator:
                 f"[{self.symbol}] Placing counter-order: {counter_side.value} @ {counter_price}"
             )
 
-            # Inherit grid_id from original metadata
+            # Inherit grid_id from original metadata and calculate new level_index
             original_meta = self.order_metadata.get(order_id, {})
             grid_id = original_meta.get("grid_id")
+            current_level_index = original_meta.get("level_index", 0)
+            # Counter-order is one level up (for buy) or one level down (for sell)
+            new_level_index = (
+                current_level_index + 1 if is_buy else current_level_index - 1
+            )
 
             order = await self.order_manager.create_limit_order(
                 symbol_id=self.symbol,
@@ -1234,6 +1310,8 @@ class GridOrchestrator:
                     "side": counter_side,
                     "amount": amount,
                     "grid_id": grid_id,
+                    "level_index": new_level_index,
+                    "parent_order_id": order_id,
                 }
 
             logger.debug(

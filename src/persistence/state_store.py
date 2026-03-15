@@ -12,7 +12,10 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
+
+from src.oms import FillRecord
+from src.persistence.fill_logger import FillLogger
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +28,20 @@ class StateStore:
     order registry (exported by OrderManager.export_state()).
     """
 
-    def __init__(self, state_file: Path) -> None:
+    def __init__(
+        self, state_file: Path, fill_logger: Optional[FillLogger] = None
+    ) -> None:
         """
         Initialise the StateStore.
 
         Args:
             state_file: Absolute path to the primary state JSON file.
+            fill_logger: Optional FillLogger for persistent fill logging.
         """
         self.state_file = state_file
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self._tmp = state_file.with_suffix(".json.tmp")
+        self.fill_logger = fill_logger
 
     def save(self, state: dict) -> None:
         """
@@ -104,7 +111,50 @@ class StateStore:
             trade: Dict describing the fill event. A '_ts' UTC timestamp
                    is added automatically before writing.
         """
+        if self.fill_logger:
+            fill_record = FillRecord.from_dict(trade)
+            self.fill_logger.log_fill(fill_record)
+
         log_path = self.state_file.parent / "trade_log.jsonl"
         trade["_ts"] = datetime.utcnow().isoformat()
         with open(log_path, "a") as f:
             f.write(json.dumps(trade, default=str) + "\n")
+
+    def get_fills_by_order(self, order_id: str) -> List[FillRecord]:
+        """
+        Get all fills for a specific order.
+
+        Args:
+            order_id: Order ID to query
+
+        Returns:
+            List of FillRecords for the order
+        """
+        if self.fill_logger:
+            return self.fill_logger.get_fills_by_order(order_id)
+        return []
+
+    def get_all_fills(self) -> List[FillRecord]:
+        """
+        Get all fill records.
+
+        Returns:
+            List of all FillRecords
+        """
+        fills = []
+        log_path = self.state_file.parent / "fill_log.jsonl"
+        if not log_path.exists():
+            return fills
+
+        try:
+            with open(log_path, "r") as f:
+                for line in f:
+                    try:
+                        data = json.loads(line.strip())
+                        fills.append(FillRecord.from_dict(data))
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            logger.error(f"Failed to read fills: {e}")
+
+        return fills
