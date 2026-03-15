@@ -95,6 +95,9 @@ class GridOrchestrator:
         self._open_long_lots: List[Dict[str, Any]] = []
         self._open_short_lots: List[Dict[str, Any]] = []
 
+        # Memory management - max lot age before cleanup
+        self._max_lot_age_seconds = float(os.getenv("GRID_MAX_LOT_AGE_SECONDS", "3600"))
+
     def _pair_fill_into_closed_trades(
         self,
         fill_price: Decimal,
@@ -792,6 +795,43 @@ class GridOrchestrator:
             f"buy_levels={buy_count}, sell_levels={sell_count}, centre={float(centre):.4f}"
         )
 
+    def _cleanup_stale_lots(self) -> Tuple[int, int]:
+        """
+        Clean up stale lots from _open_long_lots and _open_short_lots.
+
+        Lots older than _max_lot_age_seconds are removed to prevent memory growth
+        from failed/unmatched fills.
+
+        Returns:
+            Tuple of (long_lots_removed, short_lots_removed)
+        """
+        if not self._open_long_lots and not self._open_short_lots:
+            return 0, 0
+
+        now = datetime.now(timezone.utc)
+        long_removed = 0
+        short_removed = 0
+
+        # Clean stale long lots
+        self._open_long_lots = [
+            lot
+            for lot in self._open_long_lots
+            if (now - datetime.fromisoformat(lot["entry_time"])).total_seconds()
+            < self._max_lot_age_seconds
+        ]
+        long_removed = len(self._open_long_lots)
+
+        # Clean stale short lots
+        self._open_short_lots = [
+            lot
+            for lot in self._open_short_lots
+            if (now - datetime.fromisoformat(lot["entry_time"])).total_seconds()
+            < self._max_lot_age_seconds
+        ]
+        short_removed = len(self._open_short_lots)
+
+        return long_removed, short_removed
+
     async def tick(self, ohlcv_df: Any, current_price: Optional[Decimal] = None):
         """Perform periodic maintenance (regime check, fill polling, risk guards)."""
         if not self.is_active:
@@ -801,6 +841,13 @@ class GridOrchestrator:
                 return
 
         ticker = current_price
+
+        # Clean up stale lots to prevent memory growth
+        long_removed, short_removed = self._cleanup_stale_lots()
+        if long_removed > 0 or short_removed > 0:
+            logger.debug(
+                f"[{self.symbol}] Cleaned up stale lots: {long_removed} long, {short_removed} short"
+            )
 
         # 1. Safety Guards (Quick-Bank Strategy)
         # Calculate current session PnL

@@ -351,6 +351,29 @@ def health_check(request: Request):
     )
 
 
+@app.get("/memory")
+async def get_memory_stats(request: Request):
+    """Get memory-related statistics including cache sizes and history limits.
+
+    Returns information about:
+    - In-memory cache sizes (ATR, price, leverage, dedup, debounce)
+    - Trade history sizes
+    - Configured limits
+    - Last cleanup timestamps
+    """
+    bot_instance = getattr(request.app.state, "bot", None)
+
+    if not bot_instance or not bot_instance.is_running:
+        return {"status": "error", "message": "Trading bot is not running."}
+
+    try:
+        memory_stats = bot_instance.get_memory_stats()
+        return {"status": "ok", "memory": memory_stats}
+    except Exception as e:
+        logger.error(f"Error getting memory stats: {e}")
+        return {"status": "error", "message": f"Failed to get memory stats: {str(e)}"}
+
+
 @app.get("/status")
 async def get_bot_status(request: Request):
     """Get formatted status message including active positions and PnL.

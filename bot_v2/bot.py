@@ -64,6 +64,17 @@ GRID_LATENCY_WARN_INTERVAL_SECS = float(
 )
 GRID_LATENCY_WARN_DELTA_MS = float(os.getenv("GRID_LATENCY_WARN_DELTA_MS", "500"))
 
+# Memory Management Configuration
+MAX_TRADE_HISTORY_SIZE = int(os.getenv("MAX_TRADE_HISTORY_SIZE", "10000"))
+MAX_GRID_TRADE_HISTORY_SIZE = int(os.getenv("MAX_GRID_TRADE_HISTORY_SIZE", "5000"))
+MAX_DEDUP_ENTRIES = int(os.getenv("MAX_DEDUP_ENTRIES", "1000"))
+MAX_ATR_CACHE_SIZE = int(os.getenv("MAX_ATR_CACHE_SIZE", "100"))
+MAX_PRICE_CACHE_SIZE = int(os.getenv("MAX_PRICE_CACHE_SIZE", "200"))
+MAX_LEVERAGE_CACHE_SIZE = int(os.getenv("MAX_LEVERAGE_CACHE_SIZE", "50"))
+MAX_STATUS_DEBOUNCE_SIZE = int(os.getenv("MAX_STATUS_DEBOUNCE_SIZE", "200"))
+DEDUP_CLEANUP_INTERVAL_SECS = int(os.getenv("DEDUP_CLEANUP_INTERVAL_SECS", "60"))
+HISTORY_CLEANUP_INTERVAL_SECS = int(os.getenv("HISTORY_CLEANUP_INTERVAL_SECS", "300"))
+
 # Constants (EXACT from bot_v1 line 72)
 HEARTBEAT_INTERVAL_SECONDS: int = 3600  # Send heartbeat every hour
 
@@ -394,6 +405,10 @@ class TradingBot:
         # Signal deduplication (Phase 3: Burst Deduplication)
         self._dedup_window = float(os.getenv("DEDUP_WINDOW_SECONDS", "0.0"))
         self._recent_signals: Dict[Tuple[str, str], float] = {}
+
+        # Memory Management - Cleanup tracking
+        self._last_dedup_cleanup_time = 0.0
+        self._last_history_cleanup_time = 0.0
 
         logger.info(
             f"✅ TradingBot initialized successfully (multi-symbol={self.multi_symbol_mode}, {len(self.strategy_configs)} symbols)"
@@ -987,6 +1002,9 @@ class TradingBot:
                     # Run in background to avoid blocking heartbeat
                     asyncio.create_task(self.order_state_manager.prune_archive())
                     self.last_prune_time = current_time
+
+                # Memory Maintenance (caches and history cleanup)
+                await self._run_memory_maintenance()
 
                 # Sleep to avoid busy loop (adaptive when idle)
                 idle_sleep = float(os.getenv("BOTV2_IDLE_SLEEP_SECS", "1.0"))
@@ -2701,6 +2719,225 @@ class TradingBot:
                 ),
             }
         self.state_manager.save_grid_exposure_snapshot(exposure_snapshot)
+
+    def _cleanup_dedup_cache(self) -> int:
+        """
+        Clean up expired entries from _recent_signals dedup cache.
+
+        Returns:
+            Number of entries removed.
+        """
+        if not self._recent_signals:
+            return 0
+
+        current_time = time.time()
+        expired_keys = [
+            key
+            for key, timestamp in self._recent_signals.items()
+            if current_time - timestamp >= self._dedup_window
+        ]
+
+        for key in expired_keys:
+            del self._recent_signals[key]
+
+        # Also enforce max size limit
+        while len(self._recent_signals) > MAX_DEDUP_ENTRIES:
+            oldest_key = min(self._recent_signals.items(), key=lambda x: x[1])[0]
+            del self._recent_signals[oldest_key]
+
+        return len(expired_keys)
+
+    def _cleanup_memory_caches(self) -> Dict[str, int]:
+        """
+        Clean up all in-memory caches to prevent unbounded growth.
+
+        Returns:
+            Dict with counts of removed items per cache.
+        """
+        removed = {}
+
+        # Cleanup _recent_signals (dedup)
+        removed["dedup_expired"] = self._cleanup_dedup_cache()
+
+        # Cleanup _atr_cache
+        if len(self._atr_cache) > MAX_ATR_CACHE_SIZE:
+            excess = len(self._atr_cache) - MAX_ATR_CACHE_SIZE
+            oldest_keys = sorted(
+                self._atr_cache.items(), key=lambda x: x[1].get("last_access", 0)
+            )[:excess]
+            for key, _ in oldest_keys:
+                del self._atr_cache[key]
+            removed["atr_cache"] = excess
+        else:
+            removed["atr_cache"] = 0
+
+        # Cleanup _price_cache
+        if len(self._price_cache) > MAX_PRICE_CACHE_SIZE:
+            excess = len(self._price_cache) - MAX_PRICE_CACHE_SIZE
+            oldest_keys = sorted(
+                self._price_cache.items(), key=lambda x: x[1].get("ts", 0)
+            )[:excess]
+            for key, _ in oldest_keys:
+                del self._price_cache[key]
+            removed["price_cache"] = excess
+        else:
+            removed["price_cache"] = 0
+
+        # Cleanup _leverage_cache
+        if len(self._leverage_cache) > MAX_LEVERAGE_CACHE_SIZE:
+            excess = len(self._leverage_cache) - MAX_LEVERAGE_CACHE_SIZE
+            oldest_keys = sorted(self._leverage_cache.items())[:excess]
+            for key, _ in oldest_keys:
+                del self._leverage_cache[key]
+            removed["leverage_cache"] = excess
+        else:
+            removed["leverage_cache"] = 0
+
+        # Cleanup _status_debounce
+        if len(self._status_debounce) > MAX_STATUS_DEBOUNCE_SIZE:
+            excess = len(self._status_debounce) - MAX_STATUS_DEBOUNCE_SIZE
+            oldest_keys = sorted(self._status_debounce.items(), key=lambda x: x[1])[
+                :excess
+            ]
+            for key, _ in oldest_keys:
+                del self._status_debounce[key]
+            removed["status_debounce"] = excess
+        else:
+            removed["status_debounce"] = 0
+
+        return removed
+
+    def _prune_trade_history(self) -> Tuple[List[Dict], int]:
+        """
+        Prune old trade history entries to prevent unbounded growth.
+
+        Returns:
+            Tuple of (pruned_entries, count_removed)
+        """
+        removed_count = 0
+        if len(self.trade_history) <= MAX_TRADE_HISTORY_SIZE:
+            return [], 0
+
+        # Keep the most recent entries
+        excess = len(self.trade_history) - MAX_TRADE_HISTORY_SIZE
+        pruned_entries = self.trade_history[:excess]
+        self.trade_history = self.trade_history[excess:]
+        removed_count = excess
+
+        logger.info(
+            f"Pruned {removed_count} old trade history entries "
+            f"(kept {len(self.trade_history)} most recent)"
+        )
+        return pruned_entries, removed_count
+
+    async def _prune_grid_trade_history(self) -> Tuple[List[Dict], int]:
+        """
+        Prune old grid trade history entries to prevent unbounded growth.
+
+        Returns:
+            Tuple of (pruned_entries, count_removed)
+        """
+        removed_count = 0
+        async with self._grid_history_lock:
+            if len(self.grid_trade_history) <= MAX_GRID_TRADE_HISTORY_SIZE:
+                return [], 0
+
+            # Keep the most recent entries
+            excess = len(self.grid_trade_history) - MAX_GRID_TRADE_HISTORY_SIZE
+            pruned_entries = self.grid_trade_history[:excess]
+            self.grid_trade_history = self.grid_trade_history[excess:]
+            removed_count = excess
+
+        logger.info(
+            f"Pruned {removed_count} old grid trade history entries "
+            f"(kept {len(self.grid_trade_history)} most recent)"
+        )
+        return pruned_entries, removed_count
+
+    async def _run_memory_maintenance(self) -> None:
+        """
+        Run periodic memory maintenance tasks.
+
+        Called from main loop to:
+        - Clean up expired dedup cache entries
+        - Enforce size limits on all caches
+        - Prune trade history if it exceeds limit
+        - Prune grid trade history if it exceeds limit
+        """
+        current_time = time.time()
+        removed_counts: Dict[str, int] = {}
+
+        # Run dedup cleanup more frequently
+        if current_time - self._last_dedup_cleanup_time > DEDUP_CLEANUP_INTERVAL_SECS:
+            removed_counts = self._cleanup_memory_caches()
+            self._last_dedup_cleanup_time = current_time
+
+            total_removed = sum(removed_counts.values())
+            if total_removed > 0:
+                logger.debug(
+                    f"Memory cleanup: removed {total_removed} stale cache entries: {removed_counts}"
+                )
+
+        # Run history pruning less frequently
+        if (
+            current_time - self._last_history_cleanup_time
+            > HISTORY_CLEANUP_INTERVAL_SECS
+        ):
+            # Prune trade history
+            _, trade_removed = self._prune_trade_history()
+            # Prune grid trade history
+            _, grid_removed = self._prune_grid_trade_history()
+
+            if trade_removed > 0 or grid_removed > 0:
+                logger.info(
+                    f"History pruning: removed {trade_removed} trades, "
+                    f"{grid_removed} grid trades"
+                )
+
+            # Persist after pruning
+            self.state_manager.save_history(self.trade_history)
+            async with self._grid_history_lock:
+                history_snapshot = self.grid_trade_history.copy()
+            await asyncio.to_thread(
+                self.state_manager.save_grid_trade_history,
+                history_snapshot,
+            )
+
+            self._last_history_cleanup_time = current_time
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """
+        Get current memory-related statistics.
+
+        Returns:
+            Dict with cache sizes, history sizes, and cleanup timestamps.
+        """
+        return {
+            "caches": {
+                "atr_cache_size": len(self._atr_cache),
+                "price_cache_size": len(self._price_cache),
+                "leverage_cache_size": len(self._leverage_cache),
+                "status_debounce_size": len(self._status_debounce),
+                "recent_signals_size": len(self._recent_signals),
+            },
+            "history": {
+                "trade_history_size": len(self.trade_history),
+                "grid_trade_history_size": len(self.grid_trade_history),
+            },
+            "limits": {
+                "max_trade_history": MAX_TRADE_HISTORY_SIZE,
+                "max_grid_trade_history": MAX_GRID_TRADE_HISTORY_SIZE,
+                "max_dedup_entries": MAX_DEDUP_ENTRIES,
+                "max_atr_cache": MAX_ATR_CACHE_SIZE,
+                "max_price_cache": MAX_PRICE_CACHE_SIZE,
+                "max_leverage_cache": MAX_LEVERAGE_CACHE_SIZE,
+                "max_status_debounce": MAX_STATUS_DEBOUNCE_SIZE,
+            },
+            "cleanup": {
+                "last_dedup_cleanup": self._last_dedup_cleanup_time,
+                "last_history_cleanup": self._last_history_cleanup_time,
+            },
+        }
 
     async def _on_grid_trade_closed(self, trade: Dict[str, Any]) -> None:
         """Persist a closed grid trade and update symbol-level capital/performance."""
