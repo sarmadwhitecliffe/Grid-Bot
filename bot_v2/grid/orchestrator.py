@@ -53,6 +53,7 @@ class GridOrchestrator:
         ] = None,
         on_grid_fill: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         on_state_persist: Optional[Callable[[str, "GridState"], None]] = None,
+        on_session_pnl_bank: Optional[Callable[[str, Decimal], Awaitable[None]]] = None,
     ):
         self.symbol = symbol
         self.config = config
@@ -63,6 +64,7 @@ class GridOrchestrator:
         self.on_grid_trade_closed = on_grid_trade_closed
         self.on_grid_fill = on_grid_fill
         self.on_state_persist = on_state_persist
+        self.on_session_pnl_bank = on_session_pnl_bank
 
         # Initialize specialized components from src/
         self.calculator = self._init_calculator()
@@ -504,6 +506,10 @@ class GridOrchestrator:
 
         logger.info(f"[{self.symbol}] Stopping Grid session: {reason}")
 
+        # BANK SESSION PNL BEFORE STOPPING
+        # This ensures accumulated session PnL is not lost when resetting
+        await self._bank_session_pnl(reason)
+
         # PERSIST STATE BEFORE CANCELLING ORDERS
         # This preserves order info for recovery on next startup
         await self._persist_state_for_shutdown(reason)
@@ -524,6 +530,34 @@ class GridOrchestrator:
         self.is_active = False
         self.last_stop_time = time_module.time()
         self.last_stop_reason = reason
+
+    async def _bank_session_pnl(self, reason: str = "Session End"):
+        """Bank the accumulated session PnL to capital before resetting."""
+        if self.session_realized_pnl_quote == Decimal("0"):
+            logger.debug(f"[{self.symbol}] No session PnL to bank (0)")
+            return
+
+        pnl_to_bank = self.session_realized_pnl_quote
+        logger.info(
+            f"[{self.symbol}] Banking session PnL: ${pnl_to_bank:+.2f} "
+            f"(fills={self.session_fill_count}, reason={reason})"
+        )
+
+        if self.on_session_pnl_bank:
+            try:
+                await self.on_session_pnl_bank(self.symbol, pnl_to_bank)
+                logger.info(
+                    f"[{self.symbol}] Session PnL ${pnl_to_bank:+.2f} successfully banked to capital"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[{self.symbol}] Failed to bank session PnL ${pnl_to_bank:+.2f}: {e}",
+                    exc_info=True,
+                )
+        else:
+            logger.warning(
+                f"[{self.symbol}] No on_session_pnl_bank callback - PnL not banked!"
+            )
 
     async def _persist_state_for_shutdown(self, reason: str):
         """Persist grid state before shutdown for recovery on next startup."""
@@ -593,6 +627,9 @@ class GridOrchestrator:
             f"Reinvest count: {self.session_reinvest_count}"
         )
 
+        # Bank session PnL before resetting
+        await self._bank_session_pnl(reason=reason)
+
         cancel_policy = getattr(self.config, "grid_stop_policy", "cancel_open_orders")
         should_cancel = cancel_policy != "keep_open_orders"
 
@@ -607,6 +644,8 @@ class GridOrchestrator:
         self.grid_order_ids.clear()
         self.order_metadata.clear()
 
+        # Reset session PnL AFTER banking (already done in _bank_session_pnl)
+        # Keeping reset here for safety - _bank_session_pnl logs the value before clearing
         self.session_realized_pnl_quote = Decimal("0")
         self.session_fill_count = 0
         self.session_buy_qty = Decimal("0")

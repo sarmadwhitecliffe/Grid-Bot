@@ -685,6 +685,7 @@ class TradingBot:
                     on_grid_trade_closed=self._on_grid_trade_closed,
                     on_grid_fill=self._on_grid_fill,
                     on_state_persist=self._on_grid_state_persist,
+                    on_session_pnl_bank=self._on_session_pnl_bank,
                 )
 
                 # Restore high-level state if available
@@ -1032,6 +1033,20 @@ class TradingBot:
                 # Memory Maintenance (caches and history cleanup)
                 await self._run_memory_maintenance()
 
+                # Periodic Performance Metrics Update (every 15 minutes)
+                # This ensures all active symbols have performance metrics recorded
+                if not hasattr(self, "_last_perf_update_time"):
+                    self._last_perf_update_time = 0.0
+
+                perf_update_interval = 900  # 15 minutes
+                if current_time - self._last_perf_update_time > perf_update_interval:
+                    for symbol in self.grid_orchestrators.keys():
+                        self._update_performance_metrics(symbol)
+                    self._last_perf_update_time = current_time
+                    logger.debug(
+                        f"Updated performance metrics for {len(self.grid_orchestrators)} symbols"
+                    )
+
                 # Sleep to avoid busy loop (adaptive when idle)
                 idle_sleep = float(os.getenv("BOTV2_IDLE_SLEEP_SECS", "1.0"))
                 if not self.positions and self.signal_queue.empty():
@@ -1062,6 +1077,7 @@ class TradingBot:
         # mark not running so main loop will exit if it's still running
         self.is_running = False
         try:
+            # Stop all active grid orchestrators (this now banks session PnL via callbacks)
             stop_tasks = [
                 orchestrator.stop(reason="TradingBot shutdown")
                 for orchestrator in self.grid_orchestrators.values()
@@ -1069,6 +1085,23 @@ class TradingBot:
             ]
             if stop_tasks:
                 await asyncio.gather(*stop_tasks, return_exceptions=True)
+
+            # FINAL STATE PERSISTENCE
+            # Ensure all state is persisted to disk before shutdown
+            logger.info("Persisting final state before shutdown...")
+
+            # Persist all grid states and exposure
+            await self._persist_state()
+
+            # Explicitly save capitals (triggers atomic write and logs at INFO level)
+            capitals = self.capital_manager.get_all_capitals()
+            for symbol, capital in capitals.items():
+                await self.capital_manager.set_capital(symbol, capital)
+
+            # Save performance metrics
+            self.risk_manager.risk_manager._save_state()
+
+            logger.info("Final state persisted successfully")
 
             if self.live_exchange:
                 try:
@@ -3018,6 +3051,28 @@ class TradingBot:
         # Persist to disk
         self.state_manager.save_grid_states(self.grid_states)
         logger.debug(f"[{symbol}] Persisted grid state via callback")
+
+    async def _on_session_pnl_bank(self, symbol: str, pnl: Decimal) -> None:
+        """
+        Callback to bank session PnL to capital when grid session ends.
+
+        This ensures accumulated session PnL is not lost when grids stop
+        due to regime shift, max DD, or other reasons.
+        """
+        logger.info(f"[{symbol}] Banking session PnL: ${pnl:+.2f} to capital")
+
+        # Update capital with session PnL
+        await self.capital_manager.update_capital(symbol, pnl)
+
+        # Update performance metrics after capital change
+        self._update_performance_metrics(symbol)
+
+        # Check for tier transition after capital update
+        await self._check_tier_transition(symbol)
+
+        logger.info(
+            f"[{symbol}] Session PnL ${pnl:+.2f} successfully banked to capital"
+        )
 
     async def _run_grid_orchestrators_tick(self) -> None:
         """Run one tick for all active grid orchestrators with concurrent data fetches."""

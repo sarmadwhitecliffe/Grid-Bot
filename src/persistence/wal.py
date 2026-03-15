@@ -110,6 +110,7 @@ class WriteAheadLog:
     MAX_ENTRY_SIZE = 1024 * 1024  # 1MB max entry size
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB max file size before rotation
     MAX_ENTRIES = 1000  # Max entries before rotation
+    MAX_WAL_FILES = 10  # Max WAL files to keep
 
     def __init__(
         self,
@@ -189,6 +190,32 @@ class WriteAheadLog:
         if self._should_rotate(current):
             self._current_file = None
             logger.info(f"WAL rotation triggered for {current}")
+            self._cleanup_old_wal_files()
+
+    def _cleanup_old_wal_files(self, keep: int = None) -> None:
+        """Remove old WAL files, keeping only the most recent ones."""
+        if keep is None:
+            keep = self.MAX_WAL_FILES
+
+        wal_files = sorted(
+            self.current_dir.glob("wal_*.log"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        removed = 0
+        for old_file in wal_files[keep:]:
+            try:
+                old_file.unlink()
+                removed += 1
+                logger.debug(f"Removed old WAL file: {old_file.name}")
+            except Exception as e:
+                logger.error(f"Failed to remove old WAL file {old_file}: {e}")
+
+        if removed > 0:
+            logger.info(
+                f"Cleaned up {removed} old WAL files, kept {min(keep, len(wal_files))}"
+            )
 
     def append(self, operation: WALOperationType, payload: Dict[str, Any]) -> int:
         """

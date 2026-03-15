@@ -85,7 +85,9 @@ class CapitalManager:
             logger.info("No existing capitals file, initializing from strategy_configs")
             for symbol, config in self.strategy_configs.items():
                 initial = str(getattr(config, "initial_capital", "1000.00"))
-                self._capitals[symbol] = self._create_default_entry(initial, "PROBATION")
+                self._capitals[symbol] = self._create_default_entry(
+                    initial, "PROBATION"
+                )
             # Materialize file immediately so runtime state is visible from startup.
             self._save()
             return
@@ -157,9 +159,11 @@ class CapitalManager:
                     except Exception:
                         pass
 
-            logger.debug(f"Saved capitals to {self.capitals_file} (atomic)")
+            logger.info(
+                f"SAVED capitals to {self.capitals_file} (atomic) - {len(self._capitals)} symbols"
+            )
         except Exception as e:
-            logger.error(f"Error saving capitals: {e}", exc_info=True)
+            logger.error(f"ERROR saving capitals: {e}", exc_info=True)
 
     def _create_default_entry(
         self, capital: str = "1000.00", tier: str = "PROBATION"
@@ -259,7 +263,7 @@ class CapitalManager:
                                 symbol,
                                 f"CAPITAL DEPLETED: {symbol} capital hit $0 "
                                 f"(was ${current}, PnL ${pnl:+.2f}). "
-                                f"Trading halted for this symbol."
+                                f"Trading halted for this symbol.",
                             )
                         )
                     except Exception as e:
@@ -449,10 +453,10 @@ class CapitalManager:
             Dict of symbol → capital
         """
         result = {}
-        
+
         # 1. Start with configured symbols (initial capital)
         for symbol, config in self.strategy_configs.items():
-            if hasattr(config, 'initial_capital'):
+            if hasattr(config, "initial_capital"):
                 result[symbol] = Decimal(str(config.initial_capital))
             else:
                 result[symbol] = Decimal("1000.00")
@@ -460,7 +464,7 @@ class CapitalManager:
         # 2. Overwrite with actual persisted/running capitals
         for symbol, data in self._capitals.items():
             result[symbol] = Decimal(data["capital"])
-            
+
         return result
 
     def set_critical_alert_callback(self, callback) -> None:
@@ -505,7 +509,9 @@ class CapitalManager:
             scope = feature_cfg.get("scope", "global")
             scope_key_prefix = "GLOBAL" if scope == "global" else symbol
             day_key = state_manager.make_day_key()
-            override = state_manager.get_first_unconsumed_override(day_key, scope_key_prefix)
+            override = state_manager.get_first_unconsumed_override(
+                day_key, scope_key_prefix
+            )
             if not override:
                 logger.debug(
                     f"[{symbol}] leverage_override_no_pending day_key={day_key} scope={scope_key_prefix}"
