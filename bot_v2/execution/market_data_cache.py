@@ -267,19 +267,17 @@ class MarketDataCache:
         try:
             df = pd.read_parquet(path)
 
-            # Convert back to Decimal for consistency
-            for col in ["open", "high", "low", "close"]:
-                if col in df.columns:
-                    df[col] = df[col].astype(str).apply(Decimal)
-            if "volume" in df.columns:
-                df["volume"] = df["volume"].astype(str).apply(Decimal)
-
             # Restore timestamp index if present
             if "timestamp" in df.columns:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
                 df.set_index("timestamp", inplace=True)
 
-            logger.info(
+            # Ensure numeric types (handle NaN/None from parquet)
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            logger.debug(
                 f"Loaded OHLCV from disk cache: {symbol} {timeframe} ({len(df)} candles)"
             )
             return df
