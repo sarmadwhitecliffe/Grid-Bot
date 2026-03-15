@@ -469,13 +469,18 @@ class OrderStateManager:
         await asyncio.to_thread(self._save_sync, snapshot)
         logger.warning(f"Order {local_id} marked as STALE: {reason}")
 
-    async def reconcile_orders(self, exchange_fetch_func) -> Dict[str, Any]:
+    async def reconcile_orders(
+        self, exchange_fetch_func, fetch_order_func=None
+    ) -> Dict[str, Any]:
         """
         Reconcile local order state with exchange.
 
         Args:
             exchange_fetch_func: Async function to fetch open orders from exchange
                                  Should accept symbol and return list of order dicts
+            fetch_order_func: Optional async function to fetch a single order by ID.
+                              If provided, used to verify orders missing from open orders.
+                              Should accept (order_id, symbol) and return order dict or None.
 
         Returns:
             Reconciliation report with discrepancies
@@ -490,6 +495,7 @@ class OrderStateManager:
             "missing_on_exchange": [],
             "unexpected_on_exchange": [],
             "status_mismatches": [],
+            "filled_orders": [],
         }
 
         try:
@@ -522,7 +528,62 @@ class OrderStateManager:
                 exchange_order = exchange_orders.get(local_order.exchange_order_id)
 
                 if not exchange_order:
-                    # Order missing on exchange
+                    exchange_status = None
+                    verified_order = None
+
+                    if fetch_order_func:
+                        try:
+                            verified_order = await fetch_order_func(
+                                local_order.exchange_order_id, local_order.symbol
+                            )
+                            if verified_order:
+                                exchange_status = verified_order.get(
+                                    "status", ""
+                                ).upper()
+                        except Exception as e:
+                            logger.debug(
+                                f"Could not fetch order {local_order.exchange_order_id}: {e}"
+                            )
+
+                    if verified_order and exchange_status:
+                        terminal_statuses = {
+                            "FILLED",
+                            "CANCELED",
+                            "CANCELLED",
+                            "EXPIRED",
+                            "CLOSED",
+                        }
+                        if exchange_status in terminal_statuses:
+                            logger.info(
+                                f"Order {local_order.local_id} (exchange={local_order.exchange_order_id}) "
+                                f"found with terminal status: {exchange_status}"
+                            )
+                            report["filled_orders"].append(
+                                {
+                                    "local_id": local_order.local_id,
+                                    "exchange_order_id": local_order.exchange_order_id,
+                                    "symbol": local_order.symbol,
+                                    "status": exchange_status,
+                                    "filled_qty": str(verified_order.get("filled", 0)),
+                                    "avg_price": (
+                                        str(verified_order.get("average", 0))
+                                        if verified_order.get("average")
+                                        else str(verified_order.get("price", 0))
+                                    ),
+                                }
+                            )
+                            await self.update_order_status(
+                                local_order.local_id,
+                                exchange_status,
+                                str(verified_order.get("filled", 0)),
+                                (
+                                    str(verified_order.get("average", 0))
+                                    if verified_order.get("average")
+                                    else str(verified_order.get("price", 0))
+                                ),
+                            )
+                            continue
+
                     logger.warning(
                         f"Local order {local_order.local_id} (exchange={local_order.exchange_order_id}) "
                         f"not found on exchange"

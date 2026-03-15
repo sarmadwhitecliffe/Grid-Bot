@@ -8,7 +8,7 @@ Includes rate limiting, retry logic, and comprehensive error handling.
 import logging
 import os
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import ccxt.async_support as ccxt_async
 import pandas as pd
@@ -578,3 +578,57 @@ class LiveExchange(ExchangeInterface):
         except Exception as e:
             logger.error(f"Failed to fetch OHLCV for {market_id}: {e}", exc_info=True)
             return None
+
+    async def check_fills(
+        self,
+        market_id: str,
+        current_price: Optional[Decimal] = None,
+        candle_high: Optional[Decimal] = None,
+        candle_low: Optional[Decimal] = None,
+    ) -> List[str]:
+        """
+        Check for filled orders by fetching recent trades from the exchange.
+
+        This method is used by the grid orchestrator to detect fills for live trading.
+        It fetches recent trades and extracts the order IDs that were filled.
+
+        Args:
+            market_id: Exchange-specific market identifier (symbol)
+            current_price: Current market price (unused for live, kept for interface compatibility)
+            candle_high: High price of current candle (unused for live)
+            candle_low: Low price of current candle (unused for live)
+
+        Returns:
+            List of filled order IDs that can be matched against grid_order_ids
+        """
+        filled_ids: List[str] = []
+
+        try:
+            # Fetch recent trades for this symbol
+            trades = await resilient_call(
+                lambda: self.exchange.fetch_my_trades(market_id, limit=100)
+            )
+
+            if not trades:
+                logger.debug(f"No recent trades found for {market_id}")
+                return filled_ids
+
+            # Extract order IDs from filled trades
+            for trade in trades:
+                order_id = trade.get("order")
+                if order_id:
+                    filled_ids.append(str(order_id))
+
+            if filled_ids:
+                logger.debug(
+                    f"[{market_id}] Found {len(filled_ids)} filled order(s) in recent trades"
+                )
+
+            return filled_ids
+
+        except Exception as e:
+            logger.error(
+                f"[{market_id}] Failed to fetch trades for fill detection: {e}",
+                exc_info=True,
+            )
+            return filled_ids

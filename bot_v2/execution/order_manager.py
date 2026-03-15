@@ -620,4 +620,23 @@ class OrderManager:
                 logger.error(f"Failed to fetch open orders for {sym}: {e}")
                 return []
 
-        return await self.order_state_manager.reconcile_orders(fetch_open_orders)
+        async def fetch_order_by_id(order_id: str, sym: str):
+            """Fetch a single order by ID to verify its status."""
+            try:
+                market_id = self.exchange.format_market_id(sym)
+                if not market_id:
+                    return None
+
+                if hasattr(self.exchange, "exchange"):
+                    order = await self.exchange.exchange.fetch_order(
+                        order_id, market_id
+                    )
+                    return order
+                return None
+            except Exception as e:
+                logger.debug(f"Failed to fetch order {order_id}: {e}")
+                return None
+
+        return await self.order_state_manager.reconcile_orders(
+            fetch_open_orders, fetch_order_func=fetch_order_by_id
+        )
