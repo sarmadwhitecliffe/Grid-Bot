@@ -17,8 +17,8 @@ class TestMarketDataCachePreload:
 
     @pytest.fixture
     def cache(self):
-        """Create a fresh cache instance for each test."""
-        return MarketDataCache(default_ttl=30, max_size=500)
+        """Create a fresh cache instance for each test with disk cache disabled."""
+        return MarketDataCache(default_ttl=30, max_size=500, enable_disk_cache=False)
 
     @pytest.fixture
     def mock_exchange(self):
