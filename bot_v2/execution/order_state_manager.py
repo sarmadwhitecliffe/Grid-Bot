@@ -184,6 +184,10 @@ class OrderStateManager:
             5000,
         )
 
+        # CPU Optimization: Incremental fill detection
+        self._last_known_order_ids: set = set()
+        self._last_reconcile_time: Optional[float] = None
+
         # Load existing state
         self._load()
 
@@ -592,7 +596,87 @@ class OrderStateManager:
             logger.error(f"Reconciliation failed: {e}", exc_info=True)
             report["error"] = str(e)
 
+        # Update last known state for incremental fill detection
+        self._last_known_order_ids = {
+            o.exchange_order_id for o in self.get_open_orders() if o.exchange_order_id
+        }
+        import time as time_module
+
+        self._last_reconcile_time = time_module.time()
+
         return report
+
+    async def quick_fill_check(self, exchange_fetch_func) -> List[Dict[str, Any]]:
+        """
+        CPU Optimization: Quick fill check using incremental detection.
+
+        Only queries exchange for orders that might have changed, avoiding
+        full order book queries when possible.
+
+        Args:
+            exchange_fetch_func: Async function to fetch open orders from exchange
+
+        Returns:
+            List of newly filled orders (orders that were open but no longer on exchange)
+        """
+        import time as time_module
+
+        try:
+            # Get local open orders
+            local_open = self.get_open_orders()
+            if not local_open:
+                return []
+
+            # Fetch current orders from exchange
+            symbols = set(o.symbol for o in local_open)
+            current_exchange_ids: set = set()
+
+            for symbol in symbols:
+                try:
+                    orders = await exchange_fetch_func(symbol)
+                    for order in orders:
+                        order_id = str(order.get("id", ""))
+                        if order_id:
+                            current_exchange_ids.add(order_id)
+                except Exception as e:
+                    logger.debug(f"Quick fill check: failed to fetch {symbol}: {e}")
+
+            # Find orders that were on exchange but are now gone (filled/cancelled)
+            previously_known = self._last_known_order_ids
+            missing_on_exchange = previously_known - current_exchange_ids
+
+            # Also check orders we haven't seen before (new fills from this session)
+            newly_filled = []
+            for order in local_open:
+                if (
+                    order.exchange_order_id
+                    and order.exchange_order_id not in current_exchange_ids
+                ):
+                    if order.status.upper() in ["NEW", "PARTIALLY_FILLED", "OPEN"]:
+                        newly_filled.append(
+                            {
+                                "local_id": order.local_id,
+                                "exchange_order_id": order.exchange_order_id,
+                                "symbol": order.symbol,
+                                "side": order.side,
+                                "quantity": order.quantity,
+                            }
+                        )
+
+            # Update tracking state
+            self._last_known_order_ids = current_exchange_ids
+            self._last_reconcile_time = time_module.time()
+
+            if missing_on_exchange:
+                logger.info(
+                    f"Quick fill check: {len(missing_on_exchange)} orders no longer on exchange"
+                )
+
+            return newly_filled
+
+        except Exception as e:
+            logger.error(f"Quick fill check failed: {e}", exc_info=True)
+            return []
 
     async def prune_archive(self) -> None:
         """

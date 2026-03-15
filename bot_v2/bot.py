@@ -410,6 +410,16 @@ class TradingBot:
         self._last_dedup_cleanup_time = 0.0
         self._last_history_cleanup_time = 0.0
 
+        # CPU Optimization: I/O Debouncing for state persistence
+        self._last_persist_time = 0.0
+        self._persist_debounce_seconds = float(
+            os.getenv("PERSIST_DEBOUNCE_SECONDS", "5.0")
+        )
+        self._pending_persist = False
+        self._persist_debounce_enabled = (
+            os.getenv("PERSIST_DEBOUNCE_ENABLED", "true").lower() == "true"
+        )
+
         logger.info(
             f"✅ TradingBot initialized successfully (multi-symbol={self.multi_symbol_mode}, {len(self.strategy_configs)} symbols)"
         )
@@ -972,26 +982,42 @@ class TradingBot:
                     self.is_running = False
                     break
 
-                # Process pending signals
-                await self._process_signals()
+                # CPU Optimization: Run independent operations in parallel
+                # These operate on different data structures and can run concurrently
+                current_time = time.time()
 
-                # Monitor positions for exits
-                await self._monitor_positions()
+                # Create tasks for parallel execution
+                signal_task = asyncio.create_task(self._process_signals())
+                position_task = asyncio.create_task(self._monitor_positions())
+                grid_task = asyncio.create_task(self._run_grid_orchestrators_tick())
 
-                # Tick Grid Orchestrators (Phase 3 Integration) - Parallelized
-                await self._run_grid_orchestrators_tick()
+                # Wait for all three to complete
+                await asyncio.gather(signal_task, position_task, grid_task)
 
                 # Periodic order reconciliation (Phase 2: Optimization)
                 await self._run_periodic_reconciliation()
 
                 # Send periodic heartbeat (EXACT from bot_v1 lines 2409-2411)
-                current_time = time.time()
                 if current_time - self.last_heartbeat_time > HEARTBEAT_INTERVAL_SECONDS:
                     await self._send_heartbeat()
                     self.last_heartbeat_time = current_time
 
-                # Persist state
-                await self._persist_state()
+                # CPU Optimization: I/O Debouncing - only persist if enough time passed
+                # or if there's a pending persist that was debounced
+                time_since_persist = current_time - self._last_persist_time
+                should_persist = (
+                    not self._persist_debounce_enabled
+                    or time_since_persist >= self._persist_debounce_seconds
+                    or self._pending_persist
+                )
+
+                if should_persist:
+                    await self._persist_state()
+                    self._last_persist_time = current_time
+                    self._pending_persist = False
+                else:
+                    # Mark as pending - will persist on next tick after debounce period
+                    self._pending_persist = True
 
                 # Periodic Maintenance (Pruning every 6 hours)
                 if (
@@ -2885,8 +2911,8 @@ class TradingBot:
         ):
             # Prune trade history
             _, trade_removed = self._prune_trade_history()
-            # Prune grid trade history
-            _, grid_removed = self._prune_grid_trade_history()
+            # Prune grid trade history (async)
+            _, grid_removed = await self._prune_grid_trade_history()
 
             if trade_removed > 0 or grid_removed > 0:
                 logger.info(

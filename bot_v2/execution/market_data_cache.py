@@ -9,12 +9,13 @@ Features:
 - Configurable TTL (default: 30 seconds)
 - Automatic expiration based on candle timeframe
 - Thread-safe operations
-- LRU eviction for memory management
+- LRU eviction for memory management (CPU Optimized with O(1) access)
 """
 
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,8 @@ class MarketDataCache:
 
     Reduces API calls by caching data with time-based expiration.
     Cache TTL is configurable and can be aligned with candle timeframes.
+
+    CPU Optimization: Uses OrderedDict for O(1) LRU operations instead of O(n) min().
     """
 
     # Timeframe to seconds mapping
@@ -51,7 +54,8 @@ class MarketDataCache:
             default_ttl: Default time-to-live in seconds (default: 30)
             max_size: Maximum number of cache entries (default: 500)
         """
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        # CPU Optimization: Use OrderedDict for O(1) LRU eviction
+        self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._default_ttl = default_ttl
         self._max_size = max_size
 
@@ -83,14 +87,15 @@ class MarketDataCache:
         return time.time() >= entry["expiry"]
 
     def _evict_lru(self):
-        """Evict least recently used entry if cache is full."""
+        """Evict least recently used entry if cache is full.
+
+        CPU Optimization: O(1) operation using OrderedDict (popitem last=False).
+        """
         if len(self._cache) < self._max_size:
             return
 
-        # Find LRU entry (oldest last_access)
-        lru_key = min(self._cache.items(), key=lambda x: x[1].get("last_access", 0))[0]
-
-        del self._cache[lru_key]
+        # O(1) LRU eviction using OrderedDict - removes oldest item
+        lru_key, _ = self._cache.popitem(last=False)
         self._evictions += 1
         logger.debug(f"Evicted LRU cache entry: {lru_key}")
 
@@ -119,8 +124,8 @@ class MarketDataCache:
             logger.debug(f"Price cache EXPIRED: {symbol}")
             return None
 
-        # Cache hit - update last access time
-        entry["last_access"] = time.time()
+        # Cache hit - O(1) LRU update using OrderedDict
+        self._cache.move_to_end(cache_key)
         self._hits += 1
         logger.debug(f"Price cache HIT: {symbol} = {entry['price']}")
         return entry["price"]
@@ -176,7 +181,8 @@ class MarketDataCache:
             logger.debug(f"Ticker cache EXPIRED: {symbol}")
             return None
 
-        entry["last_access"] = time.time()
+        # O(1) LRU update
+        self._cache.move_to_end(cache_key)
         self._hits += 1
         logger.debug(f"Ticker cache HIT: {symbol}")
         return entry["ticker"]
@@ -238,7 +244,8 @@ class MarketDataCache:
             logger.debug(f"OHLCV cache EXPIRED: {cache_key}")
             return None
 
-        entry["last_access"] = time.time()
+        # O(1) LRU update
+        self._cache.move_to_end(cache_key)
         self._hits += 1
         logger.debug(f"OHLCV cache HIT: {cache_key}")
         return entry["ohlcv"]
