@@ -589,6 +589,79 @@ class GridOrchestrator:
                 f"[{self.symbol}] No on_session_pnl_bank callback - PnL not banked!"
             )
 
+    async def _close_all_positions_for_tp(self):
+        """
+        Close all open positions when Session TP is hit.
+
+        This ensures we bank TRUE realized profit, not phantom profit from open positions.
+        Waits for pending counter-orders to fill, then calculates actual closed PnL.
+        """
+        import asyncio
+
+        if not self._has_unmatched_positions():
+            logger.debug(f"[{self.symbol}] No open positions to close for TP")
+            return
+
+        open_long_value, open_short_value = self._get_unmatched_position_values()
+        logger.info(
+            f"[{self.symbol}] Closing positions for TP: LONG=${open_long_value:.2f}, SHORT=${open_short_value:.2f}"
+        )
+
+        # Wait for pending counter-orders to fill (max 5 seconds)
+        max_wait = 5.0
+        wait_interval = 0.5
+        elapsed = 0.0
+
+        while self._has_unmatched_positions() and elapsed < max_wait:
+            await asyncio.sleep(wait_interval)
+            elapsed += wait_interval
+            logger.debug(
+                f"[{self.symbol}] Waiting for positions to close... ({elapsed:.1f}s)"
+            )
+
+        # If still open positions after waiting, force close with market orders
+        if self._has_unmatched_positions():
+            logger.warning(
+                f"[{self.symbol}] Timeout waiting for counter-fills, force-closing positions"
+            )
+            # For each open lot, simulate a close at current market price
+            try:
+                ticker = await self.exchange.get_market_price(self.symbol)
+                if ticker:
+                    close_price = Decimal(str(ticker))
+
+                    # Close LONG positions (sell)
+                    for lot in list(self._open_long_lots):
+                        close_notional = lot["amount"] * close_price
+                        close_fee = close_notional * MAKER_FEE
+                        self.session_realized_pnl_quote += close_notional - close_fee
+                        self.session_sell_qty += lot["amount"]
+                        logger.info(
+                            f"[{self.symbol}] Force-closed LONG: {lot['amount']} @ {close_price}"
+                        )
+
+                    # Close SHORT positions (buy)
+                    for lot in list(self._open_short_lots):
+                        close_notional = lot["amount"] * close_price
+                        close_fee = close_notional * MAKER_FEE
+                        self.session_realized_pnl_quote -= close_notional - close_fee
+                        self.session_buy_qty += lot["amount"]
+                        logger.info(
+                            f"[{self.symbol}] Force-closed SHORT: {lot['amount']} @ {close_price}"
+                        )
+
+                    # Clear the lots after force-close
+                    self._open_long_lots.clear()
+                    self._open_short_lots.clear()
+
+                    logger.info(
+                        f"[{self.symbol}] Force-closed all positions. New session_pnl: ${self.session_realized_pnl_quote:.2f}"
+                    )
+            except Exception as e:
+                logger.error(f"[{self.symbol}] Failed to force-close positions: {e}")
+        else:
+            logger.info(f"[{self.symbol}] All positions closed via counter-orders")
+
     async def _persist_state_for_shutdown(self, reason: str):
         """Persist grid state before shutdown for recovery on next startup."""
         from bot_v2.models.grid_state import GridState
@@ -657,9 +730,31 @@ class GridOrchestrator:
             f"Reinvest count: {self.session_reinvest_count}"
         )
 
-        # Bank session PnL before resetting
+        # Bank session PnL before resetting (will be blocked if open positions exist)
         await self._bank_session_pnl(reason=reason)
 
+        # Check if there are unmatched positions - if so, DON'T cancel orders or clear lots!
+        if self._has_unmatched_positions():
+            open_long_value, open_short_value = self._get_unmatched_position_values()
+            logger.warning(
+                f"[{self.symbol}] Cannot re-deploy grid - unmatched positions exist! "
+                f"LONG=${open_long_value:.2f}, SHORT=${open_short_value:.2f}. "
+                f"Stopping grid but NOT clearing positions. Position tracking preserved."
+            )
+            # Stop without clearing lots - positions remain tracked for recovery
+            self.grid_order_ids.clear()
+            self.order_metadata.clear()
+            self.session_realized_pnl_quote = Decimal("0")
+            self.session_fill_count = 0
+            self.session_buy_qty = Decimal("0")
+            self.session_sell_qty = Decimal("0")
+            # DO NOT clear _open_long_lots or _open_short_lots!
+            self.is_active = False
+            self.last_stop_time = current_time
+            self.last_stop_reason = f"{reason}: Unmatched Positions"
+            return
+
+        # Normal case: no open positions, safe to cancel and redeploy
         cancel_policy = getattr(self.config, "grid_stop_policy", "cancel_open_orders")
         should_cancel = cancel_policy != "keep_open_orders"
 
@@ -945,6 +1040,8 @@ class GridOrchestrator:
                 f"[{self.symbol}] Session Take Profit ({float(session_tp_pct) * 100:.1f}%) hit! "
                 f"Profit: {float(session_profit_pct) * 100:.2f}%"
             )
+            # Close all open positions BEFORE banking to ensure true realized profit
+            await self._close_all_positions_for_tp()
             if getattr(self.config, "grid_session_tp_reinvest", True):
                 await self._bank_and_reinvest(reason="Session TP")
             else:
