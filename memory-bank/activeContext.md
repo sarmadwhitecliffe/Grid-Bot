@@ -44,6 +44,13 @@ post_date: "2026-03-16"
    - Files: `bot_v2/execution/order_manager.py`
    - Added: `_get_market_precision()`, `_quantize_price()`, `_quantize_amount()`
 
+5. **Grid Leverage Fix (HIGH)**:
+   - Problem: Grid orders not setting leverage - using default 1x or fractions
+   - Solution: Added leverage setting before grid deployment in orchestrator
+   - Files: `bot_v2/grid/orchestrator.py`
+   - Added: `_set_leverage()`, `_get_leverage_from_config()`, leverage cache
+   - Calculates: base_leverage × tier_multiplier, capped at max_leverage_cap
+
 ### Runtime Results (Before Fixes)
 - Runtime: ~50 minutes
 - Orders created: 1,858

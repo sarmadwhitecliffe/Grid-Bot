@@ -99,6 +99,70 @@ class GridOrchestrator:
 
         # Memory management - max lot age before cleanup
         self._max_lot_age_seconds = float(os.getenv("GRID_MAX_LOT_AGE_SECONDS", "3600"))
+        self._leverage_cache: Dict[str, int] = {}  # Track set leverage per symbol
+
+    def _is_live_exchange(self) -> bool:
+        """Check if using live exchange."""
+        return hasattr(self.exchange, "exchange") and self.exchange.exchange is not None
+
+    async def _set_leverage(self, leverage: int) -> bool:
+        """
+        Set leverage for the symbol on live exchange.
+
+        Returns True if leverage was set successfully or already at correct value.
+        """
+        if not self._is_live_exchange():
+            return False
+
+        try:
+            cached = self._leverage_cache.get(self.symbol)
+            if cached == leverage:
+                logger.debug(f"[{self.symbol}] Leverage already set to {leverage}x")
+                return True
+
+            logger.info(f"[{self.symbol}] Setting leverage to {leverage}x")
+            await self.exchange.exchange.set_leverage(leverage, self.symbol)
+            self._leverage_cache[self.symbol] = leverage
+            logger.info(f"[{self.symbol}] Leverage set successfully to {leverage}x")
+            return True
+        except Exception as e:
+            logger.error(f"[{self.symbol}] Failed to set leverage to {leverage}x: {e}")
+            return False
+
+    def _get_leverage_from_config(self) -> int:
+        """
+        Get configured leverage for grid orders.
+
+        Uses tier-based leverage calculation: base_leverage × multiplier, capped at max.
+        """
+        base_leverage = float(getattr(self.config, "leverage", 5))
+
+        if self.risk_manager:
+            try:
+                tier_info = self.risk_manager.get_tier_info(self.symbol)
+                multiplier = tier_info.get("leverage_multiplier", 1.0)
+                max_cap = tier_info.get("max_leverage_cap", 20)
+
+                # Calculate: base × multiplier, capped
+                calculated = base_leverage * multiplier
+                leverage = min(int(round(calculated)), max_cap)
+
+                logger.info(
+                    f"[{self.symbol}] Tier leverage: {base_leverage}x base × {multiplier}x multiplier = "
+                    f"{calculated:.1f}x (capped at {max_cap}x) -> {leverage}x"
+                )
+                return max(leverage, 1)  # Ensure at least 1x
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] Failed to get tier leverage: {e}")
+
+        # Fall back to config leverage
+        return int(base_leverage)
+        config_leverage = getattr(self.config, "leverage", None)
+        if config_leverage:
+            return int(config_leverage)
+
+        # Default to 5x
+        return 5
 
     def _pair_fill_into_closed_trades(
         self,
@@ -919,6 +983,10 @@ class GridOrchestrator:
         logger.info(f"[{self.symbol}] Deploying grid around {centre}")
         self.centre_price = centre
         self._deployment_count += 1  # Track deployment count
+
+        # Set leverage for live exchange before placing orders
+        leverage = self._get_leverage_from_config()
+        await self._set_leverage(leverage)
 
         try:
             if getattr(self.config, "grid_capital_constraint", True):

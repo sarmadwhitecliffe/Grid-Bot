@@ -103,6 +103,14 @@ Based on log analysis of ~50min runtime (1,858 orders, 1,416 fills, $100→$171.
   - Uses exchange market info for price_step/amount_step
   - Falls back to 0.0001/0.001 if unavailable
 
+#### 6e. Grid Leverage Fix (HIGH)
+- **Problem**: Grid orders not setting leverage - using default 1x or fractions
+- **Solution**: Added leverage setting before grid deployment in orchestrator
+- **Files Changed**:
+  - `bot_v2/grid/orchestrator.py` - Added `_set_leverage()`, `_get_leverage_from_config()`, leverage cache
+  - Calculates: base_leverage × tier_multiplier, capped at max_leverage_cap
+  - Called before every grid deployment (including re-centering)
+
 ## Remaining to Build
 
 - Test capital-aware grid sizing with live symbols
@@ -119,3 +127,4 @@ Based on log analysis of ~50min runtime (1,858 orders, 1,416 fills, $100→$171.
 - Previously: No grid_level_id in fill events (fixed 2026-03-16)
 - Previously: No parent_order_id for counter-orders (fixed 2026-03-16)
 - Previously: Excessive precision in order amounts (fixed 2026-03-16)
+- Previously: Grid orders not setting leverage before placement (fixed 2026-03-16)
