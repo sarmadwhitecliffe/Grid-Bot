@@ -85,3 +85,26 @@ The bot relies on `StrategyConfig` objects. Ensure `mode` is correctly set to `"
 | `grid_recentre_trigger` | `3` | Number of spacing levels drift before re-centering. |
 | `grid_adx_threshold` | `30` | Max ADX value before pausing the grid (trend protection). |
 | `grid_bb_width_threshold`| `0.04` | Max BB width before pausing (volatility protection). |
+
+## Simulated vs Live Exchange
+
+The bot supports two execution modes via the `mode` config setting:
+
+| Mode | Exchange Class | Order Execution | Fill Detection |
+|------|----------------|-----------------|---------------|
+| `live` | `LiveExchange` | Orders sent to Binance via CCXT | `fetch_my_trades()` polls actual fills |
+| `local_sim` | `SimulatedExchange` | Orders tracked in `OrderStateManager` | `current_price` crosses order price |
+
+### Fill Detection Behavior
+
+Both modes use identical fill logic:
+- **Buy orders fill** when `current_price <= order_price`
+- **Sell orders fill** when `current_price >= order_price`
+
+This ensures simulated trading produces realistic results matching live behavior.
+
+### Important Notes
+
+- **Never use candle high/low for fill detection** - causes cascade fills when the same candle is checked repeatedly
+- **Simulated exchange uses current price only** - matches live behavior where exchange matches at actual traded prices
+- **Order transitions are managed centrally** by `OrderStateManager` in both modes

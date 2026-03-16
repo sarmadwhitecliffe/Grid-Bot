@@ -796,46 +796,6 @@ class OrderStateManager:
         archive_file = self.data_dir / "orders_archive.json"
         await asyncio.to_thread(self._append_to_archive, archive_file, to_archive)
 
-        # Also prune from memory after archiving
-        self.prune_memory()
-        """
-        Remove archived orders from in-memory state to free memory.
-
-        Called after prune_archive to ensure archived orders don't remain
-        in the in-memory _orders dict.
-
-        Returns:
-            Number of orders removed from memory.
-        """
-        if len(self._orders["orders"]) <= self._max_in_memory_orders:
-            return 0
-
-        # Get all terminal orders that should be in archive
-        terminal_statuses = self._prune_statuses
-        orders_to_remove = []
-
-        for local_id, order in self._orders["orders"].items():
-            status = order.get("status", "").upper()
-            if status in terminal_statuses:
-                orders_to_remove.append(local_id)
-
-        # Remove oldest terminal orders until under limit
-        removed_count = 0
-        for local_id in orders_to_remove:
-            if len(self._orders["orders"]) <= self._max_in_memory_orders:
-                break
-            if local_id in self._orders["orders"]:
-                del self._orders["orders"][local_id]
-                removed_count += 1
-
-        if removed_count > 0:
-            logger.info(
-                f"Pruned {removed_count} orders from memory "
-                f"(current: {len(self._orders['orders'])}, max: {self._max_in_memory_orders})"
-            )
-
-        return removed_count
-
     def _append_to_archive(
         self, archive_file: Path, new_orders: Dict[str, Any]
     ) -> None:

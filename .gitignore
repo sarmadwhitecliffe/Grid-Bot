@@ -58,3 +58,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Backup and copy files
+*.backup
+*.copy.*

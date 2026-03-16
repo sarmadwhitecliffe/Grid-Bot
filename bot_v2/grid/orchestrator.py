@@ -157,12 +157,6 @@ class GridOrchestrator:
 
         # Fall back to config leverage
         return int(base_leverage)
-        config_leverage = getattr(self.config, "leverage", None)
-        if config_leverage:
-            return int(config_leverage)
-
-        # Default to 5x
-        return 5
 
     def _pair_fill_into_closed_trades(
         self,

@@ -128,3 +128,36 @@ Based on log analysis of ~50min runtime (1,858 orders, 1,416 fills, $100→$171.
 - Previously: No parent_order_id for counter-orders (fixed 2026-03-16)
 - Previously: Excessive precision in order amounts (fixed 2026-03-16)
 - Previously: Grid orders not setting leverage before placement (fixed 2026-03-16)
+
+### 7. Simulated Exchange Fill Behavior Fix (2026-03-16)
+- **Problem**: Local simulation generated 95+ trades in ~2.5 minutes due to candle-based fill detection causing cascade fills
+- **Root Cause**: 
+  - `check_fills()` used candle high/low range for fill simulation
+  - Same cached candle (60s TTL) was checked every tick (~1s)
+  - Orders within candle range would fill repeatedly on each tick
+  - Counter-orders spawned and immediately filled, causing cascade
+- **Solution**: Changed simulated exchange to match live behavior exactly
+  - `check_fills()` now uses `current_price` only (not candle range)
+  - Buy orders fill when `current_price <= order_price`
+  - Sell orders fill when `current_price >= order_price`
+  - Removed unused candle_high/candle_low/candle_timestamp parameters
+- **Files Changed**:
+  - `bot_v2/execution/simulated_exchange.py` - Simplified `check_fills()` method
+  - `bot_v2/execution/live_exchange.py` - Added unused parameters for interface compatibility
+  - `bot_v2/bot.py` - Removed candle data extraction from tick processing
+  - `bot_v2/grid/orchestrator.py` - Simplified fill detection call
+- **Result**: Simulated exchange now behaves identically to live exchange for fill detection
+
+## Known Issues
+
+- Previously: Grid exceeded capital limits (fixed)
+- Previously: Order recovery failed on restart (fixed)
+- Previously: Performance metrics showed wrong equity values (fixed)
+- Previously: Grid stopped after TP and required manual restart (fixed)
+- Previously: Leverage mismatch between backtest and adaptive risk (fixed)
+- Previously: Orders never pruned causing memory buildup (fixed 2026-03-16)
+- Previously: No grid_level_id in fill events (fixed 2026-03-16)
+- Previously: No parent_order_id for counter-orders (fixed 2026-03-16)
+- Previously: Excessive precision in order amounts (fixed 2026-03-16)
+- Previously: Grid orders not setting leverage before placement (fixed 2026-03-16)
+- Previously: Simulated exchange cascade fills due to candle-based detection (fixed 2026-03-16)

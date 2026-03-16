@@ -69,3 +69,22 @@ src/persistence/ - State persistence
 - Prices/amounts quantized to exchange precision in OrderManager
 - Test files mirror `src/` structure under `tests/`
 - bot_v2 is the production system - fix bugs there, not in src/
+
+---
+
+## Simulated Exchange (local_sim)
+
+The simulated exchange must match live exchange behavior exactly:
+
+| Aspect | Behavior |
+|--------|----------|
+| **Fill Detection** | Uses `current_price` only - never candle high/low |
+| **Buy Order Fill** | `current_price <= order_price` |
+| **Sell Order Fill** | `current_price >= order_price` |
+
+**Why not candle range?** Using candle high/low causes cascade fills: the same candle remains cached for 60s, and every 1s tick re-evaluates all orders against the same range, causing orders within that range to fill repeatedly.
+
+**Key Files:**
+- `bot_v2/execution/simulated_exchange.py` - Paper trading implementation
+- `bot_v2/execution/live_exchange.py` - CCXT live trading
+- `bot_v2/execution/exchange_interface.py` - Common interface

@@ -43,3 +43,13 @@ post_date: "2026-02-22"
 - **State Resilience:** Grid session states (centre price, active orders) are persisted via `StateManager`, ensuring the bot can recover grid positions after restarts.
 - **Webhook Command Layer:** `webhook_server.py` acts as the remote management layer, translating incoming signals into `grid_start` and `grid_stop` lifecycle events.
 - **Production Entry Point:** `run_grid_bot.sh` provides a single script to activate the virtual environment and launch the webhook server, ensuring all dependencies are sourced correctly.
+
+## Simulated Exchange Behavior Pattern (2026-03-16)
+
+- **Live Parity Principle**: `SimulatedExchange.check_fills()` must behave identically to `LiveExchange.check_fills()` for fill detection.
+- **Fill Logic**: Orders fill based on `current_price` crossing order price only:
+  - Buy orders: `current_price <= order_price` (price drops to order level)
+  - Sell orders: `current_price >= order_price` (price rises to order level)
+- **No Candle-Based Detection**: Never use candle high/low for fill simulation as it causes cascade fills when the same candle is checked repeatedly.
+- **Interface Compatibility**: Both implementations share the same `check_fills()` signature for polymorphic dispatch.
+- **Order State Management**: Fills are tracked via `OrderStateManager`, not in the exchange implementation.
