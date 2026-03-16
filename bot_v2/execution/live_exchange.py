@@ -585,6 +585,7 @@ class LiveExchange(ExchangeInterface):
         current_price: Optional[Decimal] = None,
         candle_high: Optional[Decimal] = None,
         candle_low: Optional[Decimal] = None,
+        candle_timestamp: Optional[int] = None,
     ) -> List[str]:
         """
         Check for filled orders by fetching recent trades from the exchange.
@@ -597,6 +598,7 @@ class LiveExchange(ExchangeInterface):
             current_price: Current market price (unused for live, kept for interface compatibility)
             candle_high: High price of current candle (unused for live)
             candle_low: Low price of current candle (unused for live)
+            candle_timestamp: Timestamp of the candle (ms) - unused for live, kept for interface compatibility
 
         Returns:
             List of filled order IDs that can be matched against grid_order_ids

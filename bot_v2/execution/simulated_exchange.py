@@ -322,24 +322,34 @@ class SimulatedExchange(ExchangeInterface):
         current_price: Decimal,
         candle_high: Optional[Decimal] = None,
         candle_low: Optional[Decimal] = None,
+        candle_timestamp: Optional[int] = None,
     ) -> List[str]:
         """
         Check if any open simulated orders should be filled at the current price.
+        Matches live exchange behavior: fills happen when current price crosses order price.
         Returns a list of filled order IDs.
+        
+        Args:
+            market_id: Market identifier (symbol)
+            current_price: Current market price -used to determine fills (like live exchange)
+            candle_high: Unused - kept for interface compatibility
+            candle_low: Unused - kept for interface compatibility
+            candle_timestamp: Unused - kept for interface compatibility
+        
+        Returns:
+            List of filled order IDs
         """
         if not self.order_state_manager:
             return []
 
         filled_ids = []
-        # Use candle range when available so limit orders fill on intrabar touches.
-        # Fallback to point-in-time price for backward compatibility.
-        trigger_high = candle_high if candle_high is not None else current_price
-        trigger_low = candle_low if candle_low is not None else current_price
+        symbol_key = market_id.replace("/", "")
+
         open_sim_records = [
             r
             for r in self.order_state_manager.get_open_orders()
             if r.mode == "local_sim"
-            and r.symbol.replace("/", "") == market_id.replace("/", "")
+            and r.symbol.replace("/", "") == symbol_key
         ]
 
         for record in open_sim_records:
@@ -348,16 +358,19 @@ class SimulatedExchange(ExchangeInterface):
             )
             side = record.side.lower()
 
+            # Match live exchange behavior: fill when current price crosses order price
             should_fill = False
-            if side == "buy" and trigger_low <= order_price:
+            if side == "buy" and current_price <= order_price:
+                # Buy order fills when price drops to or below order price
                 should_fill = True
-            elif side == "sell" and trigger_high >= order_price:
+            elif side == "sell" and current_price >= order_price:
+                # Sell order fills when price rises to or above order price
                 should_fill = True
 
             if should_fill:
                 logger.info(
                     f"LOCAL_SIM: Order FILLED: {record.exchange_order_id} {side} @ {order_price} "
-                    f"(Range: {trigger_low}-{trigger_high}, Last: {current_price})"
+                    f"(Price: {current_price})"
                 )
                 if record.exchange_order_id:
                     filled_ids.append(record.exchange_order_id)

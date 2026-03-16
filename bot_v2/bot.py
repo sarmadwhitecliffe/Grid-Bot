@@ -3239,8 +3239,6 @@ class TradingBot:
         try:
             exchange = self._get_exchange_for_symbol(symbol)
             current_price = Decimal(str(ohlcv.iloc[-1]["close"]))
-            candle_high = Decimal(str(ohlcv.iloc[-1]["high"]))
-            candle_low = Decimal(str(ohlcv.iloc[-1]["low"]))
 
             # 1. Check for simulated fills before ticking logic.
             if hasattr(exchange, "check_fills"):
@@ -3252,8 +3250,6 @@ class TradingBot:
                 filled_ids = await exchange.check_fills(
                     symbol,
                     current_price,
-                    candle_high=candle_high,
-                    candle_low=candle_low,
                 )
                 for oid in filled_ids:
                     order_record = open_orders_by_exchange_id.get(oid)
