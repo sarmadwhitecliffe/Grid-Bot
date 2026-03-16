@@ -4169,9 +4169,9 @@ class TradingBot:
             # Combine directional and grid histories for symbol-level performance tracking.
             combined_history = [*self.trade_history, *self.grid_trade_history]
 
-            # Get capital for this symbol to use as initial_capital for metrics
-            all_capitals = self.capital_manager.get_all_capitals()
-            initial_capital = float(all_capitals.get(symbol, Decimal("100.0")))
+            # Get initial_capital from strategy config (starting capital, not current capital)
+            config = self.strategy_configs.get(symbol)
+            initial_capital = float(config.initial_capital) if config and hasattr(config, 'initial_capital') else 100.0
 
             metrics = PerformanceAnalyzer.calculate_metrics(
                 symbol, combined_history, initial_capital=initial_capital
